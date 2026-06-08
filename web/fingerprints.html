@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fingerprint List</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body data-page="fingerprints">
+    <header class="shell-header">
+      <div>
+        <p class="eyebrow">Slow SQL Observer</p>
+        <h1>Fingerprint Rankings</h1>
+      </div>
+      <nav>
+        <a href="/index.html">Overview</a>
+        <a href="/fingerprints.html">Fingerprints</a>
+      </nav>
+    </header>
+    <main class="layout">
+      <section class="card">
+        <form id="filters" class="filters">
+          <input name="keyword" type="search" placeholder="Search normalized SQL">
+          <input name="dbName" type="text" placeholder="Database name">
+          <select name="sqlType">
+            <option value="">All SQL types</option>
+            <option value="SELECT">SELECT</option>
+            <option value="INSERT">INSERT</option>
+            <option value="UPDATE">UPDATE</option>
+            <option value="DELETE">DELETE</option>
+          </select>
+          <select name="sortBy">
+            <option value="totalQueryTimeSec">Total query time</option>
+            <option value="avgQueryTimeSec">Average query time</option>
+            <option value="maxQueryTimeSec">Max query time</option>
+            <option value="totalCount">Total count</option>
+            <option value="lastSeenAt">Last seen</option>
+          </select>
+          <button type="submit">Apply</button>
+        </form>
+        <div id="fingerprint-list"></div>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
