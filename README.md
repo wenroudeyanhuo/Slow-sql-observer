@@ -1,110 +1,106 @@
 # Slow SQL Observer
 
-A Go-based MySQL slow query log analysis system for collecting, normalizing, aggregating, and visualizing slow SQL events.
+A Go-based MySQL slow query log analysis system that reads one slow log source, fingerprints repeated SQL, aggregates metrics, and serves an API and web UI.
 
 For a Chinese version of this guide, see `README.zh-CN.md`.
 
-## What is implemented
+## V2 runtime model
 
-The current V1 codebase includes:
+The current active model is source-aware V2:
 
-- a `collector` command that incrementally reads one slow query log file
-- event framing based on MySQL `# Time:` block boundaries
-- parsing into structured slow query records
-- conservative SQL fingerprint normalization and stable hashing
-- MySQL persistence for raw records, fingerprints, aggregate stats, and checkpoints
-- HTTP APIs for overview, fingerprint list, fingerprint detail, and sample records
-- a lightweight static web UI for overview, ranking, and detail pages
+- one observed MySQL source
+- one slow query log file as the primary ingestion channel
+- one analysis MySQL schema used by Slow SQL Observer
+- one collector process
+- one API and web UI process
 
-## Quick start with Docker
+The collector must run where the configured slow log file is readable. The recommended setup is the same host as MySQL, or a host with mounted access to the slow log path.
 
-This is the recommended path for first-time users because it provides a predictable MySQL environment with the fewest manual steps.
+## Configuration
 
-1. Start MySQL:
+Preferred V2 variables:
 
-   ```powershell
-   docker compose up -d
-   ```
+- `SSO_SOURCE_INSTANCE_NAME`
+- `SSO_SOURCE_SLOW_LOG_PATH`
+- `SSO_SOURCE_DB_DSN` (optional metadata/validation probe)
+- `SSO_SOURCE_TIMEZONE`
+- `SSO_SOURCE_DESCRIPTION`
+- `SSO_ANALYSIS_DB_DSN`
+- `SSO_ANALYSIS_DB_SCHEMA`
+- `SSO_SERVER_ADDR`
+- `SSO_WEB_DIR`
+- `SSO_COLLECTOR_POLL_INTERVAL`
+- `SSO_RAW_RECORD_RETENTION_DAYS`
+- `SSO_LOG_LEVEL`
 
-2. Copy environment defaults:
+V1 variable names are still accepted for one compatibility cycle:
 
-   ```powershell
-   Copy-Item .env.example .env
-   ```
+- `SSO_INSTANCE_NAME`
+- `SSO_SLOW_LOG_PATH`
+- `SSO_DB_DSN`
+- `SSO_DB_SCHEMA`
 
-3. Adjust `.env` if you want to change the MySQL DSN, schema, slow log path, or listen address.
+When legacy names are used, the application logs deprecation warnings. If both V1 and V2 names are present, V2 names win.
 
-4. Start the API server:
+## Quick start
 
-   ```powershell
-   go run ./cmd/server
-   ```
-
-5. Start the collector in another terminal:
-
-   ```powershell
-   go run ./cmd/collector
-   ```
-
-6. Open [http://localhost:8080](http://localhost:8080).
-
-The sample slow log at `scripts/sample-slow.log` is configured by default.
-
-## Use an existing local MySQL instance
-
-If you already have MySQL running locally or on a reachable host, you can skip Docker.
-
-1. Copy environment defaults:
+1. Copy the environment template:
 
    ```powershell
    Copy-Item .env.example .env
    ```
 
-2. Update `.env` to point at your MySQL instance:
+2. Point `SSO_ANALYSIS_DB_DSN` at a MySQL account that can create schemas and tables on first startup.
 
-   - set `SSO_DB_DSN` to a MySQL DSN with permission to create schemas and tables
-   - adjust `SSO_DB_SCHEMA` if you want a schema name other than `slow_sql_observer`
-   - optionally change `SSO_SLOW_LOG_PATH` to your own slow query log file
+3. Point `SSO_SOURCE_SLOW_LOG_PATH` at a readable MySQL slow query log file.
 
-   You do not need to create the analysis schema or tables manually. The application creates them automatically on startup as long as the configured MySQL user has sufficient privileges.
+4. Optionally set `SSO_SOURCE_DB_DSN` if you want source DB connectivity checks and metadata enrichment.
 
-3. Start the API server:
+5. Start the API server:
 
    ```powershell
    go run ./cmd/server
    ```
 
-4. Start the collector in another terminal:
+6. Start the collector in another terminal:
 
    ```powershell
    go run ./cmd/collector
    ```
 
-5. Open [http://localhost:8080](http://localhost:8080).
+7. Open [http://localhost:8080](http://localhost:8080).
 
-The application reads `.env` automatically on startup. Explicit environment variables still take precedence if you set them in your shell or deployment environment.
+## Source-side prerequisites
 
-## Core flow
+The observed MySQL source should satisfy:
 
-```text
-MySQL slow query log
-  -> collector
-  -> parser
-  -> fingerprint
-  -> storage
-  -> API
-  -> web UI
-```
+- slow query logging is enabled
+- `log_output=FILE`
+- the configured slow log path is correct
+- the collector process can read that file
+
+`SSO_SOURCE_DB_DSN` is optional. It is used to probe source connectivity and collect metadata such as host or version. It is not the primary ingestion path.
+
+## Raw-record retention
+
+`SSO_RAW_RECORD_RETENTION_DAYS` controls cleanup of `slow_query_records`:
+
+- `0` or a negative value disables cleanup
+- a positive value deletes raw records older than the configured number of days
+- fingerprints and aggregate statistics are retained by default
+
+Cleanup runs from the collector loop. A retention failure degrades collector status, but it does not roll back already committed ingest results.
 
 ## API endpoints
 
+- `GET /api/source`
+- `GET /api/collector/status`
 - `GET /api/dashboard/overview`
 - `GET /api/slow-sql/fingerprints`
 - `GET /api/slow-sql/fingerprints/:id`
 - `GET /api/slow-sql/fingerprints/:id/records`
 
-## OpenSpec change
+## OpenSpec changes
 
-The active V1 implementation plan is tracked in:
-
-- `openspec/changes/build-v1-slow-log-pipeline/`
+- V1 baseline: `openspec/changes/build-v1-slow-log-pipeline/`
+- Active V2 change: `openspec/changes/add-source-aware-v2/`

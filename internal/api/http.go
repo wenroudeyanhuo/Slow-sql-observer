@@ -20,6 +20,8 @@ type QueryService interface {
 	ListFingerprints(ctx context.Context, params model.ListFingerprintsParams) (model.PaginatedFingerprints, error)
 	GetFingerprint(ctx context.Context, id int64) (*model.FingerprintRecordView, error)
 	ListFingerprintRecords(ctx context.Context, fingerprintID int64, params model.ListFingerprintRecordsParams) (model.PaginatedRecords, error)
+	GetSource(ctx context.Context) (*model.Source, error)
+	GetCollectorStatus(ctx context.Context) (*model.CollectorStatus, error)
 }
 
 type Server struct {
@@ -34,6 +36,8 @@ func NewServer(store QueryService, webDir string) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/dashboard/overview", s.handleOverview)
+	mux.HandleFunc("/api/source", s.handleSource)
+	mux.HandleFunc("/api/collector/status", s.handleCollectorStatus)
 	mux.HandleFunc("/api/slow-sql/fingerprints/", s.handleFingerprintSubroutes)
 	mux.HandleFunc("/api/slow-sql/fingerprints", s.handleFingerprintList)
 	fileServer := http.FileServer(http.Dir(s.webDir))
@@ -63,6 +67,24 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, overview)
+}
+
+func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
+	source, err := s.store.GetSource(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, source)
+}
+
+func (s *Server) handleCollectorStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := s.store.GetCollectorStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleFingerprintList(w http.ResponseWriter, r *http.Request) {

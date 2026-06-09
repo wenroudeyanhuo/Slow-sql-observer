@@ -31,6 +31,14 @@ func (stubQueryService) ListFingerprintRecords(context.Context, int64, model.Lis
 	return model.PaginatedRecords{Items: []model.SlowQueryRecord{{ID: 1, RawSQL: "SELECT 1"}}}, nil
 }
 
+func (stubQueryService) GetSource(context.Context) (*model.Source, error) {
+	return &model.Source{ID: 1, InstanceName: "source-a", SlowLogPath: "/tmp/slow.log"}, nil
+}
+
+func (stubQueryService) GetCollectorStatus(context.Context) (*model.CollectorStatus, error) {
+	return &model.CollectorStatus{SourceID: 1, CollectorState: model.CollectorStateHealthy, SourceAccessState: model.SourceAccessAccessible}, nil
+}
+
 func TestOverviewEndpoint(t *testing.T) {
 	server := NewServer(stubQueryService{}, "../../web")
 	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/overview", nil)
@@ -58,5 +66,23 @@ func TestRootServesIndexWithoutRedirectLoop(t *testing.T) {
 	}
 	if location := recorder.Header().Get("Location"); location != "" {
 		t.Fatalf("expected no redirect, got location %q", location)
+	}
+}
+
+func TestSourceStatusEndpoints(t *testing.T) {
+	server := NewServer(stubQueryService{}, "../../web")
+
+	sourceReq := httptest.NewRequest(http.MethodGet, "/api/source", nil)
+	sourceRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(sourceRecorder, sourceReq)
+	if sourceRecorder.Code != http.StatusOK {
+		t.Fatalf("expected source endpoint status 200, got %d", sourceRecorder.Code)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/collector/status", nil)
+	statusRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(statusRecorder, statusReq)
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("expected collector status endpoint status 200, got %d", statusRecorder.Code)
 	}
 }

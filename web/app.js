@@ -1,3 +1,5 @@
+let sourceContext = null;
+
 async function fetchJSON(url) {
   const response = await fetch(url);
   if (!response.ok) {
@@ -16,14 +18,42 @@ function formatDate(value) {
   return new Date(value).toLocaleString();
 }
 
+function escapeHTML(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function collectorTone(status) {
+  if (!status) return "idle";
+  if (status.collectorState === "error" || status.sourceAccessState === "inaccessible") return "error";
+  if (status.collectorState === "degraded") return "warning";
+  return "ok";
+}
+
+function sourceStateMessage(emptyMessage) {
+  if (!sourceContext || !sourceContext.status) {
+    return emptyMessage;
+  }
+  const { status } = sourceContext;
+  if (status.collectorState === "error" || status.sourceAccessState === "inaccessible") {
+    return status.lastErrorMessage || "Collector cannot access the configured source right now.";
+  }
+  if (status.collectorState === "degraded") {
+    return status.lastErrorMessage || "Collector is running in a degraded state.";
+  }
+  return emptyMessage;
+}
+
 function renderFingerprintCard(item) {
   return `
     <article class="item">
       <div class="row-head">
         <h3><a href="/fingerprint.html?id=${item.id}">#${item.id}</a></h3>
-        <span class="chip">${item.sqlType}</span>
+        <span class="chip">${escapeHTML(item.sqlType)}</span>
       </div>
-      <pre>${item.normalizedSql}</pre>
+      <pre>${escapeHTML(item.normalizedSql)}</pre>
       <div class="meta">
         <span>Total time: ${formatSeconds(item.totalQueryTimeSec)}</span>
         <span>Avg time: ${formatSeconds(item.avgQueryTimeSec)}</span>
@@ -33,6 +63,44 @@ function renderFingerprintCard(item) {
       </div>
     </article>
   `;
+}
+
+async function loadSourceContext() {
+  const target = document.getElementById("source-context");
+  if (!target) return null;
+
+  try {
+    const [source, status] = await Promise.all([
+      fetchJSON("/api/source"),
+      fetchJSON("/api/collector/status")
+    ]);
+    sourceContext = { source, status };
+    const tone = collectorTone(status);
+    target.className = `card status-card tone-${tone}`;
+    target.innerHTML = `
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Observed Source</p>
+          <h2>${escapeHTML(source.instanceName)}</h2>
+        </div>
+        <span class="status-pill tone-${tone}">${escapeHTML(status.collectorState)}</span>
+      </div>
+      <div class="meta">
+        <span>Slow log: ${escapeHTML(source.slowLogPath)}</span>
+        <span>Source access: ${escapeHTML(status.sourceAccessState)}</span>
+        <span>Last ingest: ${formatDate(status.lastSuccessfulIngestAt)}</span>
+        <span>Checkpoint: ${status.lastCheckpointOffset ?? "n/a"}</span>
+        <span>MySQL host: ${escapeHTML(source.databaseHost || "n/a")}</span>
+        <span>MySQL version: ${escapeHTML(source.databaseVersion || "n/a")}</span>
+      </div>
+      ${status.lastErrorMessage ? `<div class="status-message">${escapeHTML(status.lastErrorMessage)}</div>` : ""}
+    `;
+    return sourceContext;
+  } catch (error) {
+    target.className = "card status-card tone-error";
+    target.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+    return null;
+  }
 }
 
 async function loadOverview() {
@@ -49,7 +117,7 @@ async function loadOverview() {
   `;
 
   if (!data.topFingerprints || data.topFingerprints.length === 0) {
-    top.innerHTML = `<div class="empty">No slow SQL data has been ingested yet.</div>`;
+    top.innerHTML = `<div class="empty">${escapeHTML(sourceStateMessage("No slow SQL data has been ingested yet for this source."))}</div>`;
     return;
   }
   top.innerHTML = `<div class="list">${data.topFingerprints.map(renderFingerprintCard).join("")}</div>`;
@@ -82,7 +150,7 @@ async function loadFingerprints(params = new URLSearchParams(window.location.sea
 
   const data = await fetchJSON("/api/slow-sql/fingerprints?" + query.toString());
   if (!data.items || data.items.length === 0) {
-    container.innerHTML = `<div class="empty">No fingerprints match the current filters.</div>`;
+    container.innerHTML = `<div class="empty">${escapeHTML(sourceStateMessage("No fingerprints match the current filters for this source."))}</div>`;
     return;
   }
   container.innerHTML = `<div class="list">${data.items.map(renderFingerprintCard).join("")}</div>`;
@@ -104,12 +172,12 @@ async function loadDetail() {
       <div class="detail">
         <div class="row-head">
           <h2>Fingerprint #${fingerprint.id}</h2>
-          <span class="chip">${fingerprint.sqlType}</span>
+          <span class="chip">${escapeHTML(fingerprint.sqlType)}</span>
         </div>
-        <pre>${fingerprint.normalizedSql}</pre>
+        <pre>${escapeHTML(fingerprint.normalizedSql)}</pre>
         <div class="meta">
-          <span>Hash: ${fingerprint.fingerprintHash}</span>
-          <span>Main table: ${fingerprint.mainTableName || "n/a"}</span>
+          <span>Hash: ${escapeHTML(fingerprint.fingerprintHash)}</span>
+          <span>Main table: ${escapeHTML(fingerprint.mainTableName || "n/a")}</span>
           <span>First seen: ${formatDate(fingerprint.firstSeenAt)}</span>
           <span>Last seen: ${formatDate(fingerprint.lastSeenAt)}</span>
           <span>Total count: ${fingerprint.totalCount}</span>
@@ -120,42 +188,49 @@ async function loadDetail() {
       </div>
     `;
   } catch (error) {
-    detail.innerHTML = `<div class="empty">${error.message}</div>`;
+    detail.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
     return;
   }
 
   const data = await fetchJSON(`/api/slow-sql/fingerprints/${id}/records?page=1&pageSize=20&sortBy=occurredAt&sortOrder=desc`);
   if (!data.items || data.items.length === 0) {
-    records.innerHTML = `<div class="empty">No sample records available.</div>`;
+    records.innerHTML = `<div class="empty">${escapeHTML(sourceStateMessage("No sample records are available for this fingerprint yet."))}</div>`;
     return;
   }
   records.innerHTML = `<div class="list">${data.items.map((item) => `
       <article class="item">
         <div class="meta">
           <span>Occurred: ${formatDate(item.occurredAt)}</span>
-          <span>DB: ${item.dbName || "n/a"}</span>
-          <span>User: ${item.userName || "n/a"}</span>
-          <span>Host: ${item.clientHost || "n/a"}</span>
+          <span>DB: ${escapeHTML(item.dbName || "n/a")}</span>
+          <span>User: ${escapeHTML(item.userName || "n/a")}</span>
+          <span>Host: ${escapeHTML(item.clientHost || "n/a")}</span>
           <span>Query time: ${formatSeconds(item.queryTimeSec)}</span>
         </div>
-        <pre>${item.rawSql}</pre>
+        <pre>${escapeHTML(item.rawSql)}</pre>
       </article>
   `).join("")}</div>`;
 }
 
-const page = document.body.dataset.page;
-if (page === "overview") {
-  loadOverview().catch((error) => {
-    document.getElementById("overview-top").innerHTML = `<div class="empty">${error.message}</div>`;
-  });
+async function boot() {
+  await loadSourceContext();
+
+  const page = document.body.dataset.page;
+  if (page === "overview") {
+    await loadOverview();
+  }
+  if (page === "fingerprints") {
+    await loadFingerprints();
+  }
+  if (page === "detail") {
+    await loadDetail();
+  }
 }
-if (page === "fingerprints") {
-  loadFingerprints().catch((error) => {
-    document.getElementById("fingerprint-list").innerHTML = `<div class="empty">${error.message}</div>`;
-  });
-}
-if (page === "detail") {
-  loadDetail().catch((error) => {
-    document.getElementById("fingerprint-detail").innerHTML = `<div class="empty">${error.message}</div>`;
-  });
-}
+
+boot().catch((error) => {
+  const fallback = document.getElementById("overview-top")
+    || document.getElementById("fingerprint-list")
+    || document.getElementById("fingerprint-detail");
+  if (fallback) {
+    fallback.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+  }
+});

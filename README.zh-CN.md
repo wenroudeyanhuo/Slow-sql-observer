@@ -1,58 +1,48 @@
 # Slow SQL Observer
 
-一个基于 Go 的 MySQL 慢查询日志分析系统，用于采集、归一化、聚合并可视化慢 SQL 事件。
+这是一个基于 Go 的 MySQL 慢查询日志分析系统，用来读取单个 slow log source、对重复 SQL 做 fingerprint、聚合性能指标，并提供 API 和 Web UI。
 
-英文版说明文档见 `README.md`。
+英文版说明见 `README.md`。
 
-## 当前已实现内容
+## 当前 V2 运行模型
 
-当前 V1 代码已经包含：
+当前版本采用 source-aware V2 模型：
 
-- 一个 `collector` 命令，用于增量读取单个慢查询日志文件
-- 基于 MySQL `# Time:` 边界的事件分块能力
-- 将慢日志解析为结构化慢 SQL 记录
-- 保守型 SQL 指纹归一化与稳定哈希生成
-- 使用 MySQL 持久化原始记录、指纹、聚合统计和 checkpoint
-- 提供 overview、fingerprint 列表、fingerprint 详情、样本记录等 HTTP API
-- 一个轻量级静态 Web UI，用于展示总览、排行和详情页面
+- 一个被观测的 MySQL source
+- 一个 slow log 文件作为主采集通道
+- 一个 Slow SQL Observer 自己使用的 analysis MySQL schema
+- 一个 collector 进程
+- 一个 API / Web UI 进程
 
-## 使用 Docker 快速开始
+collector 必须运行在能够读取 slow log 文件的环境中。推荐与 MySQL 同机部署，或者至少能挂载访问 slow log 路径。
 
-这是推荐给首次使用者的方式，因为它能提供一个更稳定、可预期的 MySQL 运行环境，手动准备工作也最少。
+## 配置项
 
-1. 启动 MySQL：
+推荐使用的 V2 环境变量：
 
-   ```powershell
-   docker compose up -d
-   ```
+- `SSO_SOURCE_INSTANCE_NAME`
+- `SSO_SOURCE_SLOW_LOG_PATH`
+- `SSO_SOURCE_DB_DSN`（可选，用于 source 连通性校验和元数据补充）
+- `SSO_SOURCE_TIMEZONE`
+- `SSO_SOURCE_DESCRIPTION`
+- `SSO_ANALYSIS_DB_DSN`
+- `SSO_ANALYSIS_DB_SCHEMA`
+- `SSO_SERVER_ADDR`
+- `SSO_WEB_DIR`
+- `SSO_COLLECTOR_POLL_INTERVAL`
+- `SSO_RAW_RECORD_RETENTION_DAYS`
+- `SSO_LOG_LEVEL`
 
-2. 复制环境变量模板：
+V1 旧变量名在一个兼容周期内仍然可用：
 
-   ```powershell
-   Copy-Item .env.example .env
-   ```
+- `SSO_INSTANCE_NAME`
+- `SSO_SLOW_LOG_PATH`
+- `SSO_DB_DSN`
+- `SSO_DB_SCHEMA`
 
-3. 如果你需要修改数据库连接、schema、慢日志路径或监听端口，可以先编辑 `.env`。
+如果使用旧变量名，程序会输出 deprecated warning；如果新旧同时存在，以 V2 新变量名为准。
 
-4. 启动 API 服务：
-
-   ```powershell
-   go run ./cmd/server
-   ```
-
-5. 在另一个终端中启动 collector：
-
-   ```powershell
-   go run ./cmd/collector
-   ```
-
-6. 打开 [http://localhost:8080](http://localhost:8080)。
-
-默认已经配置好了示例慢日志文件：`scripts/sample-slow.log`。
-
-## 使用已有的本地 MySQL
-
-如果你本机已经有可用的 MySQL，或者你准备连接一个可访问的 MySQL 实例，也可以完全跳过 Docker。
+## 快速启动
 
 1. 复制环境变量模板：
 
@@ -60,44 +50,51 @@
    Copy-Item .env.example .env
    ```
 
-2. 修改 `.env` 中的数据库相关配置：
+2. 将 `SSO_ANALYSIS_DB_DSN` 配置为一个有建库建表权限的 MySQL 账号。
 
-   - 将 `SSO_DB_DSN` 改成你自己的 MySQL DSN，要求该账号有建库建表权限
-   - 如果你不想使用默认库名，可以调整 `SSO_DB_SCHEMA`
-   - 如果你要分析自己的慢日志文件，可以修改 `SSO_SLOW_LOG_PATH`
+3. 将 `SSO_SOURCE_SLOW_LOG_PATH` 配置为一个当前进程可读取的 MySQL slow log 文件路径。
 
-   你不需要手动创建 analysis schema 或数据表。只要当前配置的 MySQL 账号权限足够，程序启动时会自动完成这些初始化。
+4. 如果你希望系统补充 source DB 元数据并做连通性校验，可以额外设置 `SSO_SOURCE_DB_DSN`。
 
-3. 启动 API 服务：
+5. 启动 API 服务：
 
    ```powershell
    go run ./cmd/server
    ```
 
-4. 在另一个终端中启动 collector：
+6. 在另一个终端中启动 collector：
 
    ```powershell
    go run ./cmd/collector
    ```
 
-5. 打开 [http://localhost:8080](http://localhost:8080)。
+7. 打开 [http://localhost:8080](http://localhost:8080)。
 
-程序启动时会自动读取 `.env`。如果你在当前 shell、CI 或部署环境里显式设置了环境变量，那么显式设置的值会优先于 `.env`。
+## Source 侧前提
 
-## 核心流程
+被观测的 MySQL source 需要满足：
 
-```text
-MySQL slow query log
-  -> collector
-  -> parser
-  -> fingerprint
-  -> storage
-  -> API
-  -> web UI
-```
+- 已开启 slow query log
+- `log_output=FILE`
+- 配置的 slow log 路径正确
+- collector 进程对该日志文件有读取权限
+
+`SSO_SOURCE_DB_DSN` 是可选项。它只用于 source DB 探测和元数据补充，不是主要采集通道。
+
+## Raw record retention
+
+`SSO_RAW_RECORD_RETENTION_DAYS` 用来控制 `slow_query_records` 的清理：
+
+- `0` 或负数表示禁用自动清理
+- 正数表示删除超过保留天数的原始 slow query records
+- `fingerprints` 和聚合统计默认继续保留
+
+清理动作由 collector 在轮询过程中顺手执行。清理失败会让 collector status 进入 degraded，但不会回滚已经成功提交的采集结果。
 
 ## API 接口
 
+- `GET /api/source`
+- `GET /api/collector/status`
 - `GET /api/dashboard/overview`
 - `GET /api/slow-sql/fingerprints`
 - `GET /api/slow-sql/fingerprints/:id`
@@ -105,6 +102,5 @@ MySQL slow query log
 
 ## OpenSpec 变更
 
-当前 V1 实现计划对应的 OpenSpec change 位于：
-
-- `openspec/changes/build-v1-slow-log-pipeline/`
+- V1 基线：`openspec/changes/build-v1-slow-log-pipeline/`
+- 当前 V2 change：`openspec/changes/add-source-aware-v2/`

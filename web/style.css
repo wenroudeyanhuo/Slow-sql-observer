@@ -100,6 +100,67 @@ h1, h2, h3, p {
   gap: 1rem;
 }
 
+.status-card {
+  display: grid;
+  gap: 1rem;
+}
+
+.status-card .section-head {
+  align-items: center;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 90px;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.tone-ok {
+  border-color: rgba(31, 122, 71, 0.18);
+}
+
+.status-pill.tone-ok {
+  background: #def7e8;
+  color: #166534;
+}
+
+.tone-warning {
+  border-color: rgba(180, 83, 9, 0.18);
+}
+
+.status-pill.tone-warning {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.tone-error {
+  border-color: rgba(190, 24, 93, 0.18);
+}
+
+.status-pill.tone-error {
+  background: #ffe4e6;
+  color: #be123c;
+}
+
+.tone-idle .status-pill,
+.status-pill.tone-idle {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.status-message {
+  padding: 0.9rem 1rem;
+  border-radius: 16px;
+  background: rgba(20, 33, 61, 0.04);
+  color: var(--muted);
+}
+
 .list {
   display: grid;
   gap: 1rem;

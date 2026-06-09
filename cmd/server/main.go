@@ -15,9 +15,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	for _, warning := range cfg.Warnings {
+		log.Printf("config warning: %s", warning)
+	}
 
 	ctx := context.Background()
-	store, err := storage.Open(ctx, cfg.Database)
+	store, err := storage.Open(ctx, cfg.Analysis, &cfg.Source)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}

@@ -1,9 +1,56 @@
 package model
 
-import "time"
+import (
+	"crypto/sha1"
+	"encoding/hex"
+	"strings"
+	"time"
+)
+
+const (
+	CollectorStateIdle     = "idle"
+	CollectorStateHealthy  = "healthy"
+	CollectorStateDegraded = "degraded"
+	CollectorStateError    = "error"
+
+	SourceAccessUnknown      = "unknown"
+	SourceAccessAccessible   = "accessible"
+	SourceAccessInaccessible = "inaccessible"
+)
+
+type Source struct {
+	ID                    int64     `json:"id"`
+	Key                   string    `json:"key"`
+	InstanceName          string    `json:"instanceName"`
+	SlowLogPath           string    `json:"slowLogPath"`
+	Description           *string   `json:"description"`
+	DatabaseDSNConfigured bool      `json:"databaseDsnConfigured"`
+	DatabaseHost          *string   `json:"databaseHost"`
+	DatabaseVersion       *string   `json:"databaseVersion"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
+}
+
+type SourceMetadataUpdate struct {
+	DatabaseHost    *string
+	DatabaseVersion *string
+}
+
+type CollectorStatus struct {
+	SourceID               int64      `json:"sourceId"`
+	CollectorState         string     `json:"collectorState"`
+	SourceAccessState      string     `json:"sourceAccessState"`
+	LastSuccessfulIngestAt *time.Time `json:"lastSuccessfulIngestAt"`
+	LastCheckpointOffset   *int64     `json:"lastCheckpointOffset"`
+	LastFileIdentity       *string    `json:"lastFileIdentity"`
+	LastErrorAt            *time.Time `json:"lastErrorAt"`
+	LastErrorMessage       *string    `json:"lastErrorMessage"`
+	UpdatedAt              time.Time  `json:"updatedAt"`
+}
 
 type SlowQueryRecord struct {
 	ID                int64     `json:"id"`
+	SourceID          int64     `json:"sourceId"`
 	SourceInstance    string    `json:"sourceInstanceName"`
 	SourceLogFilePath string    `json:"sourceLogFilePath"`
 	SourceFileID      string    `json:"sourceFileIdentity"`
@@ -27,6 +74,7 @@ type SlowQueryRecord struct {
 
 type Fingerprint struct {
 	ID            int64     `json:"id"`
+	SourceID      int64     `json:"sourceId"`
 	Hash          string    `json:"fingerprintHash"`
 	NormalizedSQL string    `json:"normalizedSql"`
 	SQLType       string    `json:"sqlType"`
@@ -55,7 +103,7 @@ type FingerprintStats struct {
 }
 
 type CollectorCheckpoint struct {
-	InstanceName string    `json:"instanceName"`
+	SourceID     int64     `json:"sourceId"`
 	LogFilePath  string    `json:"logFilePath"`
 	LogFileHash  string    `json:"logFileHash"`
 	FileIdentity string    `json:"fileIdentity"`
@@ -127,4 +175,9 @@ type CollectResult struct {
 	FinalOffset     int64  `json:"finalOffset"`
 	EventsProcessed int    `json:"eventsProcessed"`
 	BytesRead       int64  `json:"bytesRead"`
+}
+
+func SourceKey(instanceName, slowLogPath string) string {
+	sum := sha1.Sum([]byte(strings.TrimSpace(instanceName) + "|" + strings.TrimSpace(slowLogPath)))
+	return hex.EncodeToString(sum[:])
 }
