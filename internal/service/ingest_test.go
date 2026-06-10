@@ -13,13 +13,16 @@ import (
 )
 
 type memoryIngestStore struct {
-	source       *model.Source
-	checkpoint   *model.CollectorCheckpoint
-	records      []model.IngestRecordInput
-	status       model.CollectorStatus
-	metadata     model.SourceMetadataUpdate
-	cleanupCalls int
-	cleanupErr   error
+	source                *model.Source
+	checkpoint            *model.CollectorCheckpoint
+	acquisitionCheckpoint *model.AcquisitionCheckpoint
+	records               []model.IngestRecordInput
+	status                model.CollectorStatus
+	acquisitionStatus     model.AcquisitionStatus
+	metadata              model.SourceMetadataUpdate
+	checkpointUpserts     []model.CollectorCheckpoint
+	cleanupCalls          int
+	cleanupErr            error
 }
 
 func (m *memoryIngestStore) GetSource(context.Context) (*model.Source, error) {
@@ -28,6 +31,10 @@ func (m *memoryIngestStore) GetSource(context.Context) (*model.Source, error) {
 
 func (m *memoryIngestStore) GetCheckpoint(context.Context, int64) (*model.CollectorCheckpoint, error) {
 	return m.checkpoint, nil
+}
+
+func (m *memoryIngestStore) GetAcquisitionCheckpoint(context.Context, int64) (*model.AcquisitionCheckpoint, error) {
+	return m.acquisitionCheckpoint, nil
 }
 
 func (m *memoryIngestStore) IngestRecord(_ context.Context, input model.IngestRecordInput) error {
@@ -48,6 +55,22 @@ func (m *memoryIngestStore) UpdateSourceMetadata(_ context.Context, _ int64, met
 
 func (m *memoryIngestStore) UpdateCollectorStatus(_ context.Context, status model.CollectorStatus) error {
 	m.status = status
+	return nil
+}
+
+func (m *memoryIngestStore) UpdateAcquisitionStatus(_ context.Context, status model.AcquisitionStatus) error {
+	m.acquisitionStatus = status
+	return nil
+}
+
+func (m *memoryIngestStore) UpsertCheckpoint(_ context.Context, checkpoint model.CollectorCheckpoint) error {
+	m.checkpoint = &checkpoint
+	m.checkpointUpserts = append(m.checkpointUpserts, checkpoint)
+	return nil
+}
+
+func (m *memoryIngestStore) UpsertAcquisitionCheckpoint(_ context.Context, checkpoint model.AcquisitionCheckpoint) error {
+	m.acquisitionCheckpoint = &checkpoint
 	return nil
 }
 
@@ -96,6 +119,9 @@ func TestCollectOnceProcessesSampleLog(t *testing.T) {
 	}
 	if store.status.CollectorState != model.CollectorStateHealthy {
 		t.Fatalf("expected healthy collector status, got %q", store.status.CollectorState)
+	}
+	if store.acquisitionStatus.AcquisitionState != model.AcquisitionStateHealthy {
+		t.Fatalf("expected healthy acquisition status, got %q", store.acquisitionStatus.AcquisitionState)
 	}
 }
 
@@ -177,5 +203,143 @@ func TestCollectOnceRetentionFailureDoesNotBreakCommittedIngest(t *testing.T) {
 	}
 	if store.status.CollectorState != model.CollectorStateDegraded {
 		t.Fatalf("expected degraded status after retention failure, got %q", store.status.CollectorState)
+	}
+}
+
+type fakeAcquisitionService struct {
+	result model.AcquisitionResult
+	err    error
+}
+
+func (f fakeAcquisitionService) Acquire(context.Context, config.SourceConfig, *model.AcquisitionCheckpoint) (model.AcquisitionResult, error) {
+	return f.result, f.err
+}
+
+func TestCollectOnceKeepsParserHealthyWhenAcquisitionFailsButSpoolStillParses(t *testing.T) {
+	dir := t.TempDir()
+	spoolPath := filepath.Join(dir, "spool.log")
+	content, err := os.ReadFile(filepath.Join("..", "..", "scripts", "sample-slow.log"))
+	if err != nil {
+		t.Fatalf("read sample log: %v", err)
+	}
+	if err := os.WriteFile(spoolPath, content, 0o644); err != nil {
+		t.Fatalf("write spool log: %v", err)
+	}
+
+	store := &memoryIngestStore{
+		source: &model.Source{
+			ID:           1,
+			InstanceName: "remote-source",
+			SlowLogPath:  "/var/log/mysql/slow.log",
+			LogMode:      model.LogModeSSHPull,
+		},
+		acquisitionCheckpoint: &model.AcquisitionCheckpoint{
+			SourceID:           1,
+			TransportMode:      model.LogModeSSHPull,
+			LastRemoteOffset:   128,
+			LastSpoolSizeBytes: int64(len(content)),
+		},
+	}
+
+	service := NewCollectorService(config.SourceConfig{
+		InstanceName:       "remote-source",
+		LogMode:            model.LogModeSSHPull,
+		RemoteHost:         "db-prod",
+		RemoteUser:         "observer",
+		RemoteSlowLogPath:  "/var/log/mysql/slow.log",
+		SSHPrivateKeyPath:  filepath.Join(dir, "id_rsa"),
+		SSHKnownHostsPath:  filepath.Join(dir, "known_hosts"),
+		LocalSpoolDir:      dir,
+		InitialPosition:    model.InitialPositionEnd,
+		LocalSpoolMaxBytes: 1024 * 1024,
+	}, config.RuntimeConfig{CollectorPollInterval: time.Second}, store)
+	service.acquire = fakeAcquisitionService{
+		result: model.AcquisitionResult{
+			ParsePath:         spoolPath,
+			TransportMode:     model.LogModeSSHPull,
+			RemoteAccessState: model.SourceAccessInaccessible,
+			SpoolPath:         spoolPath,
+			SpoolSizeBytes:    int64(len(content)),
+			ShouldParse:       true,
+			AcquisitionState:  model.AcquisitionStateError,
+		},
+		err: os.ErrDeadlineExceeded,
+	}
+
+	result, err := service.CollectOnce(context.Background())
+	if err != nil {
+		t.Fatalf("expected parser to continue using existing spool, got %v", err)
+	}
+	if result.EventsProcessed == 0 {
+		t.Fatalf("expected remote spool to be parsed")
+	}
+	if store.acquisitionStatus.AcquisitionState != model.AcquisitionStateError {
+		t.Fatalf("expected acquisition error state, got %q", store.acquisitionStatus.AcquisitionState)
+	}
+	if store.status.CollectorState != model.CollectorStateHealthy {
+		t.Fatalf("expected collector status to stay healthy, got %q", store.status.CollectorState)
+	}
+}
+
+func TestCollectOnceTruncatesFullyConsumedRemoteSpool(t *testing.T) {
+	dir := t.TempDir()
+	spoolPath := filepath.Join(dir, "spool.log")
+	content, err := os.ReadFile(filepath.Join("..", "..", "scripts", "sample-slow.log"))
+	if err != nil {
+		t.Fatalf("read sample log: %v", err)
+	}
+	if err := os.WriteFile(spoolPath, content, 0o644); err != nil {
+		t.Fatalf("write spool log: %v", err)
+	}
+
+	store := &memoryIngestStore{
+		source: &model.Source{
+			ID:           1,
+			InstanceName: "remote-source",
+			SlowLogPath:  "/var/log/mysql/slow.log",
+			LogMode:      model.LogModeSSHPull,
+		},
+	}
+	service := NewCollectorService(config.SourceConfig{
+		InstanceName:       "remote-source",
+		LogMode:            model.LogModeSSHPull,
+		RemoteHost:         "db-prod",
+		RemoteUser:         "observer",
+		RemoteSlowLogPath:  "/var/log/mysql/slow.log",
+		SSHPrivateKeyPath:  filepath.Join(dir, "id_rsa"),
+		SSHKnownHostsPath:  filepath.Join(dir, "known_hosts"),
+		LocalSpoolDir:      dir,
+		InitialPosition:    model.InitialPositionStart,
+		LocalSpoolMaxBytes: 1024 * 1024,
+	}, config.RuntimeConfig{CollectorPollInterval: time.Second}, store)
+	service.acquire = fakeAcquisitionService{
+		result: model.AcquisitionResult{
+			ParsePath:          spoolPath,
+			TransportMode:      model.LogModeSSHPull,
+			RemoteAccessState:  model.SourceAccessAccessible,
+			RemoteFileIdentity: "dev:inode",
+			RemoteOffsetEnd:    int64(len(content)),
+			SpoolPath:          spoolPath,
+			SpoolSizeBytes:     int64(len(content)),
+			ShouldParse:        true,
+			AcquisitionState:   model.AcquisitionStateHealthy,
+		},
+	}
+
+	if _, err := service.CollectOnce(context.Background()); err != nil {
+		t.Fatalf("collect once returned error: %v", err)
+	}
+	info, err := os.Stat(spoolPath)
+	if err != nil {
+		t.Fatalf("stat spool: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("expected consumed spool to be truncated, got %d bytes", info.Size())
+	}
+	if store.checkpoint == nil || store.checkpoint.LastOffset != 0 {
+		t.Fatalf("expected parser checkpoint to reset to 0 after truncation")
+	}
+	if store.acquisitionCheckpoint == nil || store.acquisitionCheckpoint.LastSpoolSizeBytes != 0 {
+		t.Fatalf("expected acquisition checkpoint spool size to reset to 0")
 	}
 }

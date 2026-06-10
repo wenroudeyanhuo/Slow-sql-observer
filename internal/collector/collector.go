@@ -29,6 +29,15 @@ func NewFramer() *Framer {
 	return &Framer{}
 }
 
+func (f *Framer) HasPending() bool {
+	return len(f.pending) > 0
+}
+
+func (f *Framer) Reset() {
+	f.pending = nil
+	f.pendingOffset = 0
+}
+
 func ResolveStartOffset(checkpoint *model.CollectorCheckpoint, state FileState) int64 {
 	if checkpoint == nil {
 		return 0

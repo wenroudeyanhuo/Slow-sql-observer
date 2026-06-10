@@ -105,6 +105,30 @@ h1, h2, h3, p {
   gap: 1rem;
 }
 
+.status-stack {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.status-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.status-group {
+  padding: 1rem;
+  border-radius: 18px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+}
+
+.status-group h3 {
+  margin-bottom: 0.75rem;
+}
+
 .status-card .section-head {
   align-items: center;
 }
@@ -159,6 +183,10 @@ h1, h2, h3, p {
   border-radius: 16px;
   background: rgba(20, 33, 61, 0.04);
   color: var(--muted);
+}
+
+.status-message strong {
+  color: var(--ink);
 }
 
 .list {

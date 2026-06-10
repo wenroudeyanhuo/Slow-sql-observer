@@ -32,7 +32,7 @@ func main() {
 		if err != nil {
 			log.Printf("collect once failed: %v", err)
 		} else {
-			log.Printf("processed %d events from %s (offset %d -> %d)", result.EventsProcessed, cfg.Source.SlowLogPath, result.StartOffset, result.FinalOffset)
+			log.Printf("processed %d events from %s (offset %d -> %d)", result.EventsProcessed, cfg.Source.IdentityPath(), result.StartOffset, result.FinalOffset)
 		}
 		time.Sleep(cfg.Runtime.CollectorPollInterval)
 	}

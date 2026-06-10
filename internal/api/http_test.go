@@ -39,6 +39,10 @@ func (stubQueryService) GetCollectorStatus(context.Context) (*model.CollectorSta
 	return &model.CollectorStatus{SourceID: 1, CollectorState: model.CollectorStateHealthy, SourceAccessState: model.SourceAccessAccessible}, nil
 }
 
+func (stubQueryService) GetAcquisitionStatus(context.Context) (*model.AcquisitionStatus, error) {
+	return &model.AcquisitionStatus{SourceID: 1, AcquisitionState: model.AcquisitionStateHealthy, RemoteAccessState: model.SourceAccessAccessible, TransportMode: model.LogModeLocalFile}, nil
+}
+
 func TestOverviewEndpoint(t *testing.T) {
 	server := NewServer(stubQueryService{}, "../../web")
 	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/overview", nil)
@@ -84,5 +88,12 @@ func TestSourceStatusEndpoints(t *testing.T) {
 	server.Handler().ServeHTTP(statusRecorder, statusReq)
 	if statusRecorder.Code != http.StatusOK {
 		t.Fatalf("expected collector status endpoint status 200, got %d", statusRecorder.Code)
+	}
+
+	acquisitionReq := httptest.NewRequest(http.MethodGet, "/api/acquisition/status", nil)
+	acquisitionRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(acquisitionRecorder, acquisitionReq)
+	if acquisitionRecorder.Code != http.StatusOK {
+		t.Fatalf("expected acquisition status endpoint status 200, got %d", acquisitionRecorder.Code)
 	}
 }

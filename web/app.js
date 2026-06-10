@@ -18,6 +18,16 @@ function formatDate(value) {
   return new Date(value).toLocaleString();
 }
 
+function formatBytes(value) {
+  if (value === null || value === undefined) return "n/a";
+  const size = Number(value);
+  if (Number.isNaN(size)) return "n/a";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 function escapeHTML(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -25,25 +35,49 @@ function escapeHTML(value) {
     .replaceAll(">", "&gt;");
 }
 
+function toneFromStatus(state, accessState) {
+  if (state === "error" || state === "blocked" || accessState === "inaccessible") return "error";
+  if (state === "degraded") return "warning";
+  if (state === "healthy") return "ok";
+  return "idle";
+}
+
 function collectorTone(status) {
   if (!status) return "idle";
-  if (status.collectorState === "error" || status.sourceAccessState === "inaccessible") return "error";
-  if (status.collectorState === "degraded") return "warning";
-  return "ok";
+  return toneFromStatus(status.collectorState, status.sourceAccessState);
+}
+
+function acquisitionTone(status) {
+  if (!status) return "idle";
+  return toneFromStatus(status.acquisitionState, status.remoteAccessState);
 }
 
 function sourceStateMessage(emptyMessage) {
-  if (!sourceContext || !sourceContext.status) {
+  if (!sourceContext) {
     return emptyMessage;
   }
-  const { status } = sourceContext;
-  if (status.collectorState === "error" || status.sourceAccessState === "inaccessible") {
-    return status.lastErrorMessage || "Collector cannot access the configured source right now.";
+
+  const acquisition = sourceContext.acquisitionStatus;
+  if (acquisition && ["error", "blocked", "degraded"].includes(acquisition.acquisitionState)) {
+    return acquisition.lastErrorMessage || "Remote acquisition is not healthy right now.";
   }
-  if (status.collectorState === "degraded") {
-    return status.lastErrorMessage || "Collector is running in a degraded state.";
+
+  const collector = sourceContext.collectorStatus;
+  if (!collector) {
+    return emptyMessage;
+  }
+  if (collector.collectorState === "error" || collector.sourceAccessState === "inaccessible") {
+    return collector.lastErrorMessage || "Collector cannot parse the configured source right now.";
+  }
+  if (collector.collectorState === "degraded") {
+    return collector.lastErrorMessage || "Collector is running in a degraded state.";
   }
   return emptyMessage;
+}
+
+function renderStatusMessage(label, message) {
+  if (!message) return "";
+  return `<div class="status-message"><strong>${escapeHTML(label)}:</strong> ${escapeHTML(message)}</div>`;
 }
 
 function renderFingerprintCard(item) {
@@ -65,36 +99,84 @@ function renderFingerprintCard(item) {
   `;
 }
 
-async function loadSourceContext() {
-  const target = document.getElementById("source-context");
-  if (!target) return null;
+function renderSourceContext(source, collectorStatus, acquisitionStatus) {
+  const collectorToneValue = collectorTone(collectorStatus);
+  const acquisitionToneValue = acquisitionTone(acquisitionStatus);
+  const remoteEndpoint = [
+    source.remoteUser ? `${source.remoteUser}@` : "",
+    source.remoteHost || "",
+    source.remotePort ? `:${source.remotePort}` : ""
+  ].join("");
 
-  try {
-    const [source, status] = await Promise.all([
-      fetchJSON("/api/source"),
-      fetchJSON("/api/collector/status")
-    ]);
-    sourceContext = { source, status };
-    const tone = collectorTone(status);
-    target.className = `card status-card tone-${tone}`;
-    target.innerHTML = `
+  return `
+    <div class="card status-card tone-${collectorToneValue}">
       <div class="section-head">
         <div>
           <p class="eyebrow">Observed Source</p>
           <h2>${escapeHTML(source.instanceName)}</h2>
         </div>
-        <span class="status-pill tone-${tone}">${escapeHTML(status.collectorState)}</span>
+        <div class="status-stack">
+          <span class="status-pill tone-${acquisitionToneValue}">acquisition: ${escapeHTML(acquisitionStatus.acquisitionState || "idle")}</span>
+          <span class="status-pill tone-${collectorToneValue}">parser: ${escapeHTML(collectorStatus.collectorState || "idle")}</span>
+        </div>
       </div>
-      <div class="meta">
-        <span>Slow log: ${escapeHTML(source.slowLogPath)}</span>
-        <span>Source access: ${escapeHTML(status.sourceAccessState)}</span>
-        <span>Last ingest: ${formatDate(status.lastSuccessfulIngestAt)}</span>
-        <span>Checkpoint: ${status.lastCheckpointOffset ?? "n/a"}</span>
-        <span>MySQL host: ${escapeHTML(source.databaseHost || "n/a")}</span>
-        <span>MySQL version: ${escapeHTML(source.databaseVersion || "n/a")}</span>
+
+      <div class="status-grid">
+        <section class="status-group">
+          <h3>Source</h3>
+          <div class="meta">
+            <span>Mode: ${escapeHTML(source.logMode || "local_file")}</span>
+            <span>Observed log: ${escapeHTML(source.slowLogPath)}</span>
+            <span>Initial position: ${escapeHTML(source.initialPosition || "end")}</span>
+            <span>MySQL host: ${escapeHTML(source.databaseHost || "n/a")}</span>
+            <span>MySQL version: ${escapeHTML(source.databaseVersion || "n/a")}</span>
+          </div>
+        </section>
+
+        <section class="status-group">
+          <h3>Acquisition</h3>
+          <div class="meta">
+            <span>Transport: ${escapeHTML(acquisitionStatus.transportMode || source.logMode || "local_file")}</span>
+            <span>Remote access: ${escapeHTML(acquisitionStatus.remoteAccessState || "unknown")}</span>
+            <span>Remote endpoint: ${escapeHTML(remoteEndpoint || "n/a")}</span>
+            <span>Remote path: ${escapeHTML(source.remoteSlowLogPath || "n/a")}</span>
+            <span>Local spool: ${escapeHTML(source.localSpoolPath || "n/a")}</span>
+            <span>Spool size: ${formatBytes(acquisitionStatus.lastSpoolSizeBytes)}</span>
+            <span>Spool ceiling: ${formatBytes(source.localSpoolMaxBytes)}</span>
+            <span>Last pull: ${formatDate(acquisitionStatus.lastSuccessfulPullAt)}</span>
+            <span>Remote offset: ${acquisitionStatus.lastRemoteOffset ?? "n/a"}</span>
+          </div>
+        </section>
+
+        <section class="status-group">
+          <h3>Parser</h3>
+          <div class="meta">
+            <span>Collector access: ${escapeHTML(collectorStatus.sourceAccessState || "unknown")}</span>
+            <span>Last ingest: ${formatDate(collectorStatus.lastSuccessfulIngestAt)}</span>
+            <span>Checkpoint: ${collectorStatus.lastCheckpointOffset ?? "n/a"}</span>
+            <span>Current file id: ${escapeHTML(collectorStatus.lastFileIdentity || "n/a")}</span>
+          </div>
+        </section>
       </div>
-      ${status.lastErrorMessage ? `<div class="status-message">${escapeHTML(status.lastErrorMessage)}</div>` : ""}
-    `;
+
+      ${renderStatusMessage("Acquisition", acquisitionStatus.lastErrorMessage)}
+      ${renderStatusMessage("Parser", collectorStatus.lastErrorMessage)}
+    </div>
+  `;
+}
+
+async function loadSourceContext() {
+  const target = document.getElementById("source-context");
+  if (!target) return null;
+
+  try {
+    const [source, collectorStatus, acquisitionStatus] = await Promise.all([
+      fetchJSON("/api/source"),
+      fetchJSON("/api/collector/status"),
+      fetchJSON("/api/acquisition/status")
+    ]);
+    sourceContext = { source, collectorStatus, acquisitionStatus };
+    target.innerHTML = renderSourceContext(source, collectorStatus, acquisitionStatus);
     return sourceContext;
   } catch (error) {
     target.className = "card status-card tone-error";
@@ -224,6 +306,17 @@ async function boot() {
   if (page === "detail") {
     await loadDetail();
   }
+}
+
+if (globalThis.__SSO_TEST__) {
+  globalThis.__SSO_TEST__ = {
+    formatBytes,
+    renderSourceContext,
+    sourceStateMessage,
+    setSourceContext(value) {
+      sourceContext = value;
+    }
+  };
 }
 
 boot().catch((error) => {

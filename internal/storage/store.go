@@ -91,6 +91,14 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			source_db_dsn_configured BOOLEAN NOT NULL,
 			source_db_host VARCHAR(255) NULL,
 			source_db_version VARCHAR(255) NULL,
+			source_log_mode VARCHAR(32) NOT NULL DEFAULT 'local_file',
+			source_remote_host VARCHAR(255) NULL,
+			source_remote_port INT NULL,
+			source_remote_user VARCHAR(255) NULL,
+			source_remote_slow_log_path VARCHAR(1024) NULL,
+			source_local_spool_path VARCHAR(1024) NULL,
+			source_initial_position VARCHAR(16) NOT NULL DEFAULT 'end',
+			source_local_spool_max_bytes BIGINT NULL,
 			created_at DATETIME(6) NOT NULL,
 			updated_at DATETIME(6) NOT NULL,
 			PRIMARY KEY (id),
@@ -120,6 +128,35 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			PRIMARY KEY (id),
 			UNIQUE KEY uk_checkpoint_source (source_id),
 			CONSTRAINT fk_checkpoint_source FOREIGN KEY (source_id) REFERENCES sources(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS acquisition_checkpoints (
+			source_id BIGINT NOT NULL,
+			transport_mode VARCHAR(32) NOT NULL,
+			remote_host VARCHAR(255) NULL,
+			remote_path VARCHAR(1024) NULL,
+			remote_file_identity VARCHAR(255) NULL,
+			last_remote_offset BIGINT NOT NULL,
+			local_spool_path VARCHAR(1024) NULL,
+			last_spool_size_bytes BIGINT NOT NULL,
+			initial_position VARCHAR(16) NOT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			PRIMARY KEY (source_id),
+			CONSTRAINT fk_acq_checkpoint_source FOREIGN KEY (source_id) REFERENCES sources(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS acquisition_status (
+			source_id BIGINT NOT NULL,
+			acquisition_state VARCHAR(32) NOT NULL,
+			remote_access_state VARCHAR(32) NOT NULL,
+			transport_mode VARCHAR(32) NOT NULL,
+			last_successful_pull_at DATETIME(6) NULL,
+			last_remote_offset BIGINT NULL,
+			last_remote_file_identity VARCHAR(255) NULL,
+			last_spool_size_bytes BIGINT NULL,
+			last_error_at DATETIME(6) NULL,
+			last_error_message TEXT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			PRIMARY KEY (source_id),
+			CONSTRAINT fk_acq_status_source FOREIGN KEY (source_id) REFERENCES sources(id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS fingerprints (
 			id BIGINT NOT NULL AUTO_INCREMENT,
@@ -199,6 +236,30 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 func (s *Store) migrateLegacySourceTables(ctx context.Context, source *model.Source) error {
 	if source == nil {
 		return nil
+	}
+	if err := s.ensureColumn(ctx, "sources", "`source_log_mode` VARCHAR(32) NOT NULL DEFAULT 'local_file' AFTER `source_db_version`"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sources", "`source_remote_host` VARCHAR(255) NULL AFTER `source_log_mode`"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sources", "`source_remote_port` INT NULL AFTER `source_remote_host`"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sources", "`source_remote_user` VARCHAR(255) NULL AFTER `source_remote_port`"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sources", "`source_remote_slow_log_path` VARCHAR(1024) NULL AFTER `source_remote_user`"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sources", "`source_local_spool_path` VARCHAR(1024) NULL AFTER `source_remote_slow_log_path`"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sources", "`source_initial_position` VARCHAR(16) NOT NULL DEFAULT 'end' AFTER `source_local_spool_path`"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sources", "`source_local_spool_max_bytes` BIGINT NULL AFTER `source_initial_position`"); err != nil {
+		return err
 	}
 
 	if err := s.ensureColumn(ctx, "collector_checkpoints", "`source_id` BIGINT NULL AFTER `id`"); err != nil {
@@ -372,6 +433,107 @@ func (s *Store) GetSource(ctx context.Context) (*model.Source, error) {
 	return nil, fmt.Errorf("active source is not configured")
 }
 
+func (s *Store) GetAcquisitionStatus(ctx context.Context) (*model.AcquisitionStatus, error) {
+	source, err := s.GetSource(ctx)
+	if err != nil {
+		return nil, err
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT source_id, acquisition_state, remote_access_state, transport_mode, last_successful_pull_at,
+		       last_remote_offset, last_remote_file_identity, last_spool_size_bytes, last_error_at, last_error_message, updated_at
+		FROM acquisition_status
+		WHERE source_id = ?`,
+		source.ID,
+	)
+	var status model.AcquisitionStatus
+	var lastSuccessful sql.NullTime
+	var lastRemoteOffset sql.NullInt64
+	var lastRemoteIdentity sql.NullString
+	var lastSpoolSize sql.NullInt64
+	var lastErrorAt sql.NullTime
+	var lastErrorMessage sql.NullString
+	if err := row.Scan(
+		&status.SourceID,
+		&status.AcquisitionState,
+		&status.RemoteAccessState,
+		&status.TransportMode,
+		&lastSuccessful,
+		&lastRemoteOffset,
+		&lastRemoteIdentity,
+		&lastSpoolSize,
+		&lastErrorAt,
+		&lastErrorMessage,
+		&status.UpdatedAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			now := time.Now().UTC()
+			return &model.AcquisitionStatus{
+				SourceID:          source.ID,
+				AcquisitionState:  model.AcquisitionStateIdle,
+				RemoteAccessState: model.SourceAccessUnknown,
+				TransportMode:     source.LogMode,
+				UpdatedAt:         now,
+			}, nil
+		}
+		return nil, err
+	}
+	if lastSuccessful.Valid {
+		status.LastSuccessfulPullAt = &lastSuccessful.Time
+	}
+	if lastRemoteOffset.Valid {
+		value := lastRemoteOffset.Int64
+		status.LastRemoteOffset = &value
+	}
+	if lastRemoteIdentity.Valid {
+		value := lastRemoteIdentity.String
+		status.LastRemoteFileIdentity = &value
+	}
+	if lastSpoolSize.Valid {
+		value := lastSpoolSize.Int64
+		status.LastSpoolSizeBytes = &value
+	}
+	if lastErrorAt.Valid {
+		status.LastErrorAt = &lastErrorAt.Time
+	}
+	if lastErrorMessage.Valid {
+		value := lastErrorMessage.String
+		status.LastErrorMessage = &value
+	}
+	return &status, nil
+}
+
+func (s *Store) UpdateAcquisitionStatus(ctx context.Context, status model.AcquisitionStatus) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO acquisition_status (
+			source_id, acquisition_state, remote_access_state, transport_mode, last_successful_pull_at,
+			last_remote_offset, last_remote_file_identity, last_spool_size_bytes, last_error_at, last_error_message, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			acquisition_state = VALUES(acquisition_state),
+			remote_access_state = VALUES(remote_access_state),
+			transport_mode = VALUES(transport_mode),
+			last_successful_pull_at = VALUES(last_successful_pull_at),
+			last_remote_offset = VALUES(last_remote_offset),
+			last_remote_file_identity = VALUES(last_remote_file_identity),
+			last_spool_size_bytes = VALUES(last_spool_size_bytes),
+			last_error_at = VALUES(last_error_at),
+			last_error_message = VALUES(last_error_message),
+			updated_at = VALUES(updated_at)`,
+		status.SourceID,
+		status.AcquisitionState,
+		status.RemoteAccessState,
+		status.TransportMode,
+		status.LastSuccessfulPullAt,
+		status.LastRemoteOffset,
+		status.LastRemoteFileIdentity,
+		status.LastSpoolSizeBytes,
+		status.LastErrorAt,
+		status.LastErrorMessage,
+		time.Now().UTC(),
+	)
+	return err
+}
+
 func (s *Store) UpdateSourceMetadata(ctx context.Context, sourceID int64, metadata model.SourceMetadataUpdate) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE sources
@@ -511,6 +673,105 @@ func (s *Store) GetCheckpoint(ctx context.Context, sourceID int64) (*model.Colle
 		return nil, err
 	}
 	return &checkpoint, nil
+}
+
+func (s *Store) UpsertCheckpoint(ctx context.Context, checkpoint model.CollectorCheckpoint) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO collector_checkpoints (source_id, log_file_path, log_file_path_hash, file_identity, last_offset, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			log_file_path = VALUES(log_file_path),
+			log_file_path_hash = VALUES(log_file_path_hash),
+			file_identity = VALUES(file_identity),
+			last_offset = VALUES(last_offset),
+			updated_at = VALUES(updated_at)`,
+		checkpoint.SourceID,
+		checkpoint.LogFilePath,
+		pathHash(checkpoint.LogFilePath),
+		checkpoint.FileIdentity,
+		checkpoint.LastOffset,
+		time.Now().UTC(),
+	)
+	return err
+}
+
+func (s *Store) GetAcquisitionCheckpoint(ctx context.Context, sourceID int64) (*model.AcquisitionCheckpoint, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT source_id, transport_mode, remote_host, remote_path, remote_file_identity, last_remote_offset,
+		       local_spool_path, last_spool_size_bytes, initial_position, updated_at
+		FROM acquisition_checkpoints
+		WHERE source_id = ?`,
+		sourceID,
+	)
+	var checkpoint model.AcquisitionCheckpoint
+	var remoteHost sql.NullString
+	var remotePath sql.NullString
+	var remoteIdentity sql.NullString
+	var spoolPath sql.NullString
+	if err := row.Scan(
+		&checkpoint.SourceID,
+		&checkpoint.TransportMode,
+		&remoteHost,
+		&remotePath,
+		&remoteIdentity,
+		&checkpoint.LastRemoteOffset,
+		&spoolPath,
+		&checkpoint.LastSpoolSizeBytes,
+		&checkpoint.InitialPosition,
+		&checkpoint.UpdatedAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if remoteHost.Valid {
+		value := remoteHost.String
+		checkpoint.RemoteHost = &value
+	}
+	if remotePath.Valid {
+		value := remotePath.String
+		checkpoint.RemotePath = &value
+	}
+	if remoteIdentity.Valid {
+		value := remoteIdentity.String
+		checkpoint.RemoteFileIdentity = &value
+	}
+	if spoolPath.Valid {
+		value := spoolPath.String
+		checkpoint.LocalSpoolPath = &value
+	}
+	return &checkpoint, nil
+}
+
+func (s *Store) UpsertAcquisitionCheckpoint(ctx context.Context, checkpoint model.AcquisitionCheckpoint) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO acquisition_checkpoints (
+			source_id, transport_mode, remote_host, remote_path, remote_file_identity, last_remote_offset,
+			local_spool_path, last_spool_size_bytes, initial_position, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			transport_mode = VALUES(transport_mode),
+			remote_host = VALUES(remote_host),
+			remote_path = VALUES(remote_path),
+			remote_file_identity = VALUES(remote_file_identity),
+			last_remote_offset = VALUES(last_remote_offset),
+			local_spool_path = VALUES(local_spool_path),
+			last_spool_size_bytes = VALUES(last_spool_size_bytes),
+			initial_position = VALUES(initial_position),
+			updated_at = VALUES(updated_at)`,
+		checkpoint.SourceID,
+		checkpoint.TransportMode,
+		checkpoint.RemoteHost,
+		checkpoint.RemotePath,
+		checkpoint.RemoteFileIdentity,
+		checkpoint.LastRemoteOffset,
+		checkpoint.LocalSpoolPath,
+		checkpoint.LastSpoolSizeBytes,
+		checkpoint.InitialPosition,
+		time.Now().UTC(),
+	)
+	return err
 }
 
 func (s *Store) IngestRecord(ctx context.Context, input model.IngestRecordInput) error {
@@ -761,23 +1022,41 @@ func (s *Store) ListFingerprintRecords(ctx context.Context, fingerprintID int64,
 
 func (s *Store) ensureSource(ctx context.Context, cfg config.SourceConfig) (*model.Source, error) {
 	now := time.Now().UTC()
-	key := model.SourceKey(cfg.InstanceName, cfg.SlowLogPath)
+	key := model.SourceKey(cfg.InstanceName, cfg.IdentityPath())
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sources (
 			source_key, source_instance_name, source_slow_log_path, source_description,
-			source_db_dsn_configured, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?)
+			source_db_dsn_configured, source_log_mode, source_remote_host, source_remote_port,
+			source_remote_user, source_remote_slow_log_path, source_local_spool_path,
+			source_initial_position, source_local_spool_max_bytes, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			source_instance_name = VALUES(source_instance_name),
 			source_slow_log_path = VALUES(source_slow_log_path),
 			source_description = VALUES(source_description),
 			source_db_dsn_configured = VALUES(source_db_dsn_configured),
+			source_log_mode = VALUES(source_log_mode),
+			source_remote_host = VALUES(source_remote_host),
+			source_remote_port = VALUES(source_remote_port),
+			source_remote_user = VALUES(source_remote_user),
+			source_remote_slow_log_path = VALUES(source_remote_slow_log_path),
+			source_local_spool_path = VALUES(source_local_spool_path),
+			source_initial_position = VALUES(source_initial_position),
+			source_local_spool_max_bytes = VALUES(source_local_spool_max_bytes),
 			updated_at = VALUES(updated_at)`,
 		key,
 		cfg.InstanceName,
-		cfg.SlowLogPath,
+		cfg.IdentityPath(),
 		nullableString(cfg.Description),
 		strings.TrimSpace(cfg.DatabaseDSN) != "",
+		cfg.LogMode,
+		nullableString(cfg.RemoteHost),
+		nullableInt(cfg.RemotePort),
+		nullableString(cfg.RemoteUser),
+		nullableString(cfg.RemoteSlowLogPath),
+		nullableString(cfg.EffectiveParsePath()),
+		cfg.InitialPosition,
+		nullableInt64(cfg.LocalSpoolMaxBytes),
 		now,
 		now,
 	)
@@ -787,7 +1066,10 @@ func (s *Store) ensureSource(ctx context.Context, cfg config.SourceConfig) (*mod
 
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, source_key, source_instance_name, source_slow_log_path, source_description,
-		       source_db_dsn_configured, source_db_host, source_db_version, created_at, updated_at
+		       source_db_dsn_configured, source_db_host, source_db_version, source_log_mode,
+		       source_remote_host, source_remote_port, source_remote_user, source_remote_slow_log_path,
+		       source_local_spool_path, source_initial_position, source_local_spool_max_bytes,
+		       created_at, updated_at
 		FROM sources
 		WHERE source_key = ?`,
 		key,
@@ -942,6 +1224,12 @@ func scanSource(scanner interface {
 	var description sql.NullString
 	var databaseHost sql.NullString
 	var databaseVersion sql.NullString
+	var remoteHost sql.NullString
+	var remotePort sql.NullInt64
+	var remoteUser sql.NullString
+	var remoteSlowLogPath sql.NullString
+	var localSpoolPath sql.NullString
+	var localSpoolMaxBytes sql.NullInt64
 	if err := scanner.Scan(
 		&source.ID,
 		&source.Key,
@@ -951,6 +1239,14 @@ func scanSource(scanner interface {
 		&source.DatabaseDSNConfigured,
 		&databaseHost,
 		&databaseVersion,
+		&source.LogMode,
+		&remoteHost,
+		&remotePort,
+		&remoteUser,
+		&remoteSlowLogPath,
+		&localSpoolPath,
+		&source.InitialPosition,
+		&localSpoolMaxBytes,
 		&source.CreatedAt,
 		&source.UpdatedAt,
 	); err != nil {
@@ -967,6 +1263,30 @@ func scanSource(scanner interface {
 	if databaseVersion.Valid {
 		value := databaseVersion.String
 		source.DatabaseVersion = &value
+	}
+	if remoteHost.Valid {
+		value := remoteHost.String
+		source.RemoteHost = &value
+	}
+	if remotePort.Valid {
+		value := int(remotePort.Int64)
+		source.RemotePort = &value
+	}
+	if remoteUser.Valid {
+		value := remoteUser.String
+		source.RemoteUser = &value
+	}
+	if remoteSlowLogPath.Valid {
+		value := remoteSlowLogPath.String
+		source.RemoteSlowLogPath = &value
+	}
+	if localSpoolPath.Valid {
+		value := localSpoolPath.String
+		source.LocalSpoolPath = &value
+	}
+	if localSpoolMaxBytes.Valid {
+		value := localSpoolMaxBytes.Int64
+		source.LocalSpoolMaxBytes = &value
 	}
 	return &source, nil
 }
@@ -1119,6 +1439,20 @@ func nullableString(value string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+func nullableInt(value int) *int {
+	if value == 0 {
+		return nil
+	}
+	return &value
+}
+
+func nullableInt64(value int64) *int64 {
+	if value == 0 {
+		return nil
+	}
+	return &value
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, definition string) error {

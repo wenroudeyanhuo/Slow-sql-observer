@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"slow-sql-observer/internal/model"
 )
 
 type Config struct {
@@ -24,11 +26,21 @@ type ServerConfig struct {
 }
 
 type SourceConfig struct {
-	InstanceName string
-	SlowLogPath  string
-	DatabaseDSN  string
-	Timezone     string
-	Description  string
+	InstanceName       string
+	SlowLogPath        string
+	DatabaseDSN        string
+	Timezone           string
+	Description        string
+	LogMode            string
+	RemoteHost         string
+	RemotePort         int
+	RemoteUser         string
+	RemoteSlowLogPath  string
+	SSHPrivateKeyPath  string
+	SSHKnownHostsPath  string
+	LocalSpoolDir      string
+	InitialPosition    string
+	LocalSpoolMaxBytes int64
 }
 
 type AnalysisConfig struct {
@@ -54,11 +66,21 @@ func Load() (Config, error) {
 			WebDir: resolver.stringValue("SSO_WEB_DIR", nil, "./web"),
 		},
 		Source: SourceConfig{
-			InstanceName: resolver.stringValue("SSO_SOURCE_INSTANCE_NAME", []string{"SSO_INSTANCE_NAME"}, "local-mysql"),
-			SlowLogPath:  resolver.stringValue("SSO_SOURCE_SLOW_LOG_PATH", []string{"SSO_SLOW_LOG_PATH"}, "./scripts/sample-slow.log"),
-			DatabaseDSN:  resolver.stringValue("SSO_SOURCE_DB_DSN", nil, ""),
-			Timezone:     resolver.stringValue("SSO_SOURCE_TIMEZONE", nil, ""),
-			Description:  resolver.stringValue("SSO_SOURCE_DESCRIPTION", nil, ""),
+			InstanceName:       resolver.stringValue("SSO_SOURCE_INSTANCE_NAME", []string{"SSO_INSTANCE_NAME"}, "local-mysql"),
+			SlowLogPath:        resolver.stringValue("SSO_SOURCE_SLOW_LOG_PATH", []string{"SSO_SLOW_LOG_PATH"}, "./scripts/sample-slow.log"),
+			DatabaseDSN:        resolver.stringValue("SSO_SOURCE_DB_DSN", nil, ""),
+			Timezone:           resolver.stringValue("SSO_SOURCE_TIMEZONE", nil, ""),
+			Description:        resolver.stringValue("SSO_SOURCE_DESCRIPTION", nil, ""),
+			LogMode:            normalizeLogMode(resolver.stringValue("SSO_SOURCE_LOG_MODE", nil, model.LogModeLocalFile)),
+			RemoteHost:         resolver.stringValue("SSO_SOURCE_REMOTE_HOST", nil, ""),
+			RemotePort:         resolver.intValue("SSO_SOURCE_REMOTE_PORT", nil, 22),
+			RemoteUser:         resolver.stringValue("SSO_SOURCE_REMOTE_USER", nil, ""),
+			RemoteSlowLogPath:  resolver.stringValue("SSO_SOURCE_REMOTE_SLOW_LOG_PATH", nil, ""),
+			SSHPrivateKeyPath:  resolver.stringValue("SSO_SOURCE_SSH_PRIVATE_KEY_PATH", nil, ""),
+			SSHKnownHostsPath:  resolver.stringValue("SSO_SOURCE_SSH_KNOWN_HOSTS_PATH", nil, ""),
+			LocalSpoolDir:      resolver.stringValue("SSO_SOURCE_LOCAL_SPOOL_DIR", nil, "./var/spool"),
+			InitialPosition:    normalizeInitialPosition(resolver.stringValue("SSO_SOURCE_INITIAL_POSITION", nil, model.InitialPositionEnd)),
+			LocalSpoolMaxBytes: resolver.int64Value("SSO_SOURCE_LOCAL_SPOOL_MAX_BYTES", nil, 64*1024*1024),
 		},
 		Analysis: AnalysisConfig{
 			DSN:    resolver.stringValue("SSO_ANALYSIS_DB_DSN", []string{"SSO_DB_DSN"}, "root:root@tcp(127.0.0.1:3306)/"),
@@ -75,8 +97,11 @@ func Load() (Config, error) {
 	if strings.TrimSpace(cfg.Source.InstanceName) == "" {
 		return Config{}, fmt.Errorf("SSO_SOURCE_INSTANCE_NAME must not be empty")
 	}
-	if strings.TrimSpace(cfg.Source.SlowLogPath) == "" {
+	if cfg.Source.LogMode == model.LogModeLocalFile && strings.TrimSpace(cfg.Source.SlowLogPath) == "" {
 		return Config{}, fmt.Errorf("SSO_SOURCE_SLOW_LOG_PATH must not be empty")
+	}
+	if err := cfg.Source.Validate(); err != nil {
+		return Config{}, err
 	}
 	if strings.TrimSpace(cfg.Analysis.DSN) == "" {
 		return Config{}, fmt.Errorf("SSO_ANALYSIS_DB_DSN must not be empty")
@@ -131,6 +156,18 @@ func (r *envResolver) intValue(preferred string, legacy []string, fallback int) 
 		return fallback
 	}
 	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func (r *envResolver) int64Value(preferred string, legacy []string, fallback int64) int64 {
+	raw := r.stringValue(preferred, legacy, "")
+	if strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		return fallback
 	}
@@ -197,4 +234,73 @@ func loadDotEnv(path string) error {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 	return nil
+}
+
+func normalizeLogMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case model.LogModeSSHPull:
+		return model.LogModeSSHPull
+	default:
+		return model.LogModeLocalFile
+	}
+}
+
+func normalizeInitialPosition(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case model.InitialPositionStart:
+		return model.InitialPositionStart
+	default:
+		return model.InitialPositionEnd
+	}
+}
+
+func (s SourceConfig) Validate() error {
+	switch s.LogMode {
+	case model.LogModeLocalFile:
+		if strings.TrimSpace(s.SlowLogPath) == "" {
+			return fmt.Errorf("SSO_SOURCE_SLOW_LOG_PATH must not be empty in local_file mode")
+		}
+	case model.LogModeSSHPull:
+		if strings.TrimSpace(s.RemoteHost) == "" {
+			return fmt.Errorf("SSO_SOURCE_REMOTE_HOST must not be empty in ssh_pull mode")
+		}
+		if strings.TrimSpace(s.RemoteUser) == "" {
+			return fmt.Errorf("SSO_SOURCE_REMOTE_USER must not be empty in ssh_pull mode")
+		}
+		if strings.TrimSpace(s.RemoteSlowLogPath) == "" {
+			return fmt.Errorf("SSO_SOURCE_REMOTE_SLOW_LOG_PATH must not be empty in ssh_pull mode")
+		}
+		if strings.TrimSpace(s.SSHPrivateKeyPath) == "" {
+			return fmt.Errorf("SSO_SOURCE_SSH_PRIVATE_KEY_PATH must not be empty in ssh_pull mode")
+		}
+		if strings.TrimSpace(s.SSHKnownHostsPath) == "" {
+			return fmt.Errorf("SSO_SOURCE_SSH_KNOWN_HOSTS_PATH must not be empty in ssh_pull mode")
+		}
+		if strings.TrimSpace(s.LocalSpoolDir) == "" {
+			return fmt.Errorf("SSO_SOURCE_LOCAL_SPOOL_DIR must not be empty in ssh_pull mode")
+		}
+		if s.RemotePort <= 0 {
+			return fmt.Errorf("SSO_SOURCE_REMOTE_PORT must be positive in ssh_pull mode")
+		}
+		if s.LocalSpoolMaxBytes <= 0 {
+			return fmt.Errorf("SSO_SOURCE_LOCAL_SPOOL_MAX_BYTES must be positive in ssh_pull mode")
+		}
+	default:
+		return fmt.Errorf("unsupported SSO_SOURCE_LOG_MODE: %s", s.LogMode)
+	}
+	return nil
+}
+
+func (s SourceConfig) IdentityPath() string {
+	if s.LogMode == model.LogModeSSHPull && strings.TrimSpace(s.RemoteSlowLogPath) != "" {
+		return s.RemoteSlowLogPath
+	}
+	return s.SlowLogPath
+}
+
+func (s SourceConfig) EffectiveParsePath() string {
+	if s.LogMode == model.LogModeSSHPull {
+		return filepath.Join(s.LocalSpoolDir, model.SourceKey(s.InstanceName, s.IdentityPath())+".slow.log")
+	}
+	return s.SlowLogPath
 }

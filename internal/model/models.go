@@ -16,6 +16,18 @@ const (
 	SourceAccessUnknown      = "unknown"
 	SourceAccessAccessible   = "accessible"
 	SourceAccessInaccessible = "inaccessible"
+
+	AcquisitionStateIdle     = "idle"
+	AcquisitionStateHealthy  = "healthy"
+	AcquisitionStateDegraded = "degraded"
+	AcquisitionStateError    = "error"
+	AcquisitionStateBlocked  = "blocked"
+
+	LogModeLocalFile = "local_file"
+	LogModeSSHPull   = "ssh_pull"
+
+	InitialPositionStart = "start"
+	InitialPositionEnd   = "end"
 )
 
 type Source struct {
@@ -27,6 +39,14 @@ type Source struct {
 	DatabaseDSNConfigured bool      `json:"databaseDsnConfigured"`
 	DatabaseHost          *string   `json:"databaseHost"`
 	DatabaseVersion       *string   `json:"databaseVersion"`
+	LogMode               string    `json:"logMode"`
+	RemoteHost            *string   `json:"remoteHost"`
+	RemotePort            *int      `json:"remotePort"`
+	RemoteUser            *string   `json:"remoteUser"`
+	RemoteSlowLogPath     *string   `json:"remoteSlowLogPath"`
+	LocalSpoolPath        *string   `json:"localSpoolPath"`
+	InitialPosition       string    `json:"initialPosition"`
+	LocalSpoolMaxBytes    *int64    `json:"localSpoolMaxBytes"`
 	CreatedAt             time.Time `json:"createdAt"`
 	UpdatedAt             time.Time `json:"updatedAt"`
 }
@@ -43,6 +63,33 @@ type CollectorStatus struct {
 	LastSuccessfulIngestAt *time.Time `json:"lastSuccessfulIngestAt"`
 	LastCheckpointOffset   *int64     `json:"lastCheckpointOffset"`
 	LastFileIdentity       *string    `json:"lastFileIdentity"`
+	LastErrorAt            *time.Time `json:"lastErrorAt"`
+	LastErrorMessage       *string    `json:"lastErrorMessage"`
+	UpdatedAt              time.Time  `json:"updatedAt"`
+}
+
+type AcquisitionCheckpoint struct {
+	SourceID           int64     `json:"sourceId"`
+	TransportMode      string    `json:"transportMode"`
+	RemoteHost         *string   `json:"remoteHost"`
+	RemotePath         *string   `json:"remotePath"`
+	RemoteFileIdentity *string   `json:"remoteFileIdentity"`
+	LastRemoteOffset   int64     `json:"lastRemoteOffset"`
+	LocalSpoolPath     *string   `json:"localSpoolPath"`
+	LastSpoolSizeBytes int64     `json:"lastSpoolSizeBytes"`
+	InitialPosition    string    `json:"initialPosition"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+}
+
+type AcquisitionStatus struct {
+	SourceID               int64      `json:"sourceId"`
+	AcquisitionState       string     `json:"acquisitionState"`
+	RemoteAccessState      string     `json:"remoteAccessState"`
+	TransportMode          string     `json:"transportMode"`
+	LastSuccessfulPullAt   *time.Time `json:"lastSuccessfulPullAt"`
+	LastRemoteOffset       *int64     `json:"lastRemoteOffset"`
+	LastRemoteFileIdentity *string    `json:"lastRemoteFileIdentity"`
+	LastSpoolSizeBytes     *int64     `json:"lastSpoolSizeBytes"`
 	LastErrorAt            *time.Time `json:"lastErrorAt"`
 	LastErrorMessage       *string    `json:"lastErrorMessage"`
 	UpdatedAt              time.Time  `json:"updatedAt"`
@@ -175,6 +222,22 @@ type CollectResult struct {
 	FinalOffset     int64  `json:"finalOffset"`
 	EventsProcessed int    `json:"eventsProcessed"`
 	BytesRead       int64  `json:"bytesRead"`
+}
+
+type AcquisitionResult struct {
+	ParsePath             string
+	TransportMode         string
+	RemoteAccessState     string
+	RemoteFileIdentity    string
+	RemoteOffsetStart     int64
+	RemoteOffsetEnd       int64
+	SpoolPath             string
+	SpoolSizeBytes        int64
+	ShouldParse           bool
+	ShouldTruncate        bool
+	AcquisitionState      string
+	AcquisitionError      error
+	BlockedConfiguration  bool
 }
 
 func SourceKey(instanceName, slowLogPath string) string {

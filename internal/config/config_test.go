@@ -81,3 +81,44 @@ func TestLoadFallsBackToLegacyNamesForOneCycle(t *testing.T) {
 		t.Fatalf("expected warning text to mention deprecation")
 	}
 }
+
+func TestLoadAcceptsSSHPullConfiguration(t *testing.T) {
+	t.Setenv("SSO_SOURCE_INSTANCE_NAME", "remote-mysql")
+	t.Setenv("SSO_SOURCE_LOG_MODE", "ssh_pull")
+	t.Setenv("SSO_SOURCE_REMOTE_HOST", "db-prod")
+	t.Setenv("SSO_SOURCE_REMOTE_PORT", "22")
+	t.Setenv("SSO_SOURCE_REMOTE_USER", "observer")
+	t.Setenv("SSO_SOURCE_REMOTE_SLOW_LOG_PATH", "/var/log/mysql/slow.log")
+	t.Setenv("SSO_SOURCE_SSH_PRIVATE_KEY_PATH", "C:/keys/id_rsa")
+	t.Setenv("SSO_SOURCE_SSH_KNOWN_HOSTS_PATH", "C:/keys/known_hosts")
+	t.Setenv("SSO_SOURCE_LOCAL_SPOOL_DIR", "./var/spool")
+	t.Setenv("SSO_SOURCE_INITIAL_POSITION", "start")
+	t.Setenv("SSO_SOURCE_LOCAL_SPOOL_MAX_BYTES", "2048")
+	t.Setenv("SSO_ANALYSIS_DB_DSN", "root:root@tcp(127.0.0.1:3306)/")
+	t.Setenv("SSO_ANALYSIS_DB_SCHEMA", "slow_sql_observer")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Source.LogMode != "ssh_pull" {
+		t.Fatalf("expected ssh_pull mode, got %q", cfg.Source.LogMode)
+	}
+	if cfg.Source.EffectiveParsePath() == "" {
+		t.Fatalf("expected spool parse path to be derived")
+	}
+	if cfg.Source.IdentityPath() != "/var/log/mysql/slow.log" {
+		t.Fatalf("expected remote slow log path as identity path, got %q", cfg.Source.IdentityPath())
+	}
+}
+
+func TestLoadRejectsIncompleteSSHPullConfiguration(t *testing.T) {
+	t.Setenv("SSO_SOURCE_INSTANCE_NAME", "remote-mysql")
+	t.Setenv("SSO_SOURCE_LOG_MODE", "ssh_pull")
+	t.Setenv("SSO_ANALYSIS_DB_DSN", "root:root@tcp(127.0.0.1:3306)/")
+	t.Setenv("SSO_ANALYSIS_DB_SCHEMA", "slow_sql_observer")
+
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected ssh_pull validation error")
+	}
+}
