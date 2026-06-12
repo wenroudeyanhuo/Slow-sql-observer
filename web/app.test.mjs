@@ -76,3 +76,31 @@ assert.match(rendered, /acquisition: blocked/i);
 assert.match(rendered, /parser: healthy/i);
 assert.match(rendered, /Remote endpoint: observer@db-prod:22/);
 assert.match(rendered, /Spool size: 128 B/);
+
+const daySelect = {
+  value: "30",
+  options: [
+    { value: "1", disabled: false },
+    { value: "7", disabled: false },
+    { value: "30", disabled: false }
+  ]
+};
+helpers.syncTrendDayOptions(daySelect, "hour");
+assert.equal(daySelect.value, "7");
+assert.equal(daySelect.options[2].disabled, true);
+
+const chart = helpers.renderTrendChart(
+  [
+    { bucketStart: "2026-06-10T00:00:00Z", totalQueryTimeSec: 1.2 },
+    { bucketStart: "2026-06-11T00:00:00Z", totalQueryTimeSec: 2.4 }
+  ],
+  {
+    title: "Total query time trend",
+    valueKey: "totalQueryTimeSec",
+    valueFormatter: (value) => `${value.toFixed(1)}s`,
+    bucket: "day",
+    emptyMessage: "no data"
+  }
+);
+assert.match(chart, /svg/i);
+assert.match(chart, /Latest: 2\.4s/);

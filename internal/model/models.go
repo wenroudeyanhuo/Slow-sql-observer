@@ -212,6 +212,55 @@ type OverviewParams struct {
 	MinQueryTimeSec float64
 }
 
+const (
+	TrendBucketDay  = "day"
+	TrendBucketHour = "hour"
+)
+
+type TrendParams struct {
+	Bucket          string
+	Days            int
+	DBName          string
+	MinQueryTimeSec float64
+}
+
+type DashboardTrendBucket struct {
+	BucketStart       time.Time `json:"bucketStart"`
+	TotalRecords      int64     `json:"totalRecords"`
+	TotalFingerprints int64     `json:"totalFingerprints"`
+	TotalQueryTimeSec float64   `json:"totalQueryTimeSec"`
+	AvgQueryTimeSec   float64   `json:"avgQueryTimeSec"`
+	MaxQueryTimeSec   float64   `json:"maxQueryTimeSec"`
+}
+
+type DashboardTrends struct {
+	ActiveMinQueryTimeSec float64                `json:"activeMinQueryTimeSec"`
+	Bucket                string                 `json:"bucket"`
+	Days                  int                    `json:"days"`
+	DBName                string                 `json:"dbName,omitempty"`
+	WindowStart           time.Time              `json:"windowStart"`
+	WindowEnd             time.Time              `json:"windowEnd"`
+	Series                []DashboardTrendBucket `json:"series"`
+}
+
+type FingerprintTrendBucket struct {
+	BucketStart       time.Time `json:"bucketStart"`
+	TotalCount        int64     `json:"totalCount"`
+	TotalQueryTimeSec float64   `json:"totalQueryTimeSec"`
+	AvgQueryTimeSec   float64   `json:"avgQueryTimeSec"`
+	MaxQueryTimeSec   float64   `json:"maxQueryTimeSec"`
+}
+
+type FingerprintTrends struct {
+	ActiveMinQueryTimeSec float64                  `json:"activeMinQueryTimeSec"`
+	FingerprintID         int64                    `json:"fingerprintId"`
+	Bucket                string                   `json:"bucket"`
+	Days                  int                      `json:"days"`
+	WindowStart           time.Time                `json:"windowStart"`
+	WindowEnd             time.Time                `json:"windowEnd"`
+	Series                []FingerprintTrendBucket `json:"series"`
+}
+
 type ListFingerprintsParams struct {
 	Page            int
 	PageSize        int

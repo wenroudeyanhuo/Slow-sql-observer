@@ -34,6 +34,114 @@ function formatThreshold(value) {
   return `query time >= ${numeric.toFixed(3)}s`;
 }
 
+function formatBucketLabel(value, bucket) {
+  const date = new Date(value);
+  if (bucket === "hour") {
+    return date.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  }
+  return date.toLocaleDateString([], {
+    month: "short",
+    day: "numeric"
+  });
+}
+
+function syncTrendDayOptions(select, bucket) {
+  if (!select) return;
+  const maxDays = bucket === "hour" ? 7 : 30;
+  const options = Array.from(select.options);
+  let hasSelected = false;
+  for (const option of options) {
+    const numeric = Number(option.value);
+    const enabled = numeric <= maxDays;
+    option.disabled = !enabled;
+    if (enabled && option.value === select.value) {
+      hasSelected = true;
+    }
+  }
+  if (!hasSelected) {
+    select.value = bucket === "hour" ? "7" : "30";
+  }
+}
+
+function summarizeSeries(series, valueKey) {
+  const values = series.map((item) => Number(item[valueKey] || 0));
+  const total = values.reduce((sum, value) => sum + value, 0);
+  const max = values.reduce((best, value) => Math.max(best, value), 0);
+  return { total, max };
+}
+
+function renderTrendChart(series, options) {
+  const values = series.map((item) => Number(item[options.valueKey] || 0));
+  const hasData = values.some((value) => value > 0);
+  if (!hasData) {
+    return `<div class="empty">${escapeHTML(options.emptyMessage)}</div>`;
+  }
+
+  const width = 920;
+  const height = 260;
+  const paddingX = 42;
+  const paddingY = 24;
+  const innerWidth = width - paddingX * 2;
+  const innerHeight = height - paddingY * 2;
+  const maxValue = Math.max(...values, 1);
+
+  const points = values.map((value, index) => {
+    const x = series.length === 1
+      ? width / 2
+      : paddingX + (innerWidth * index) / (series.length - 1);
+    const y = paddingY + innerHeight - (value / maxValue) * innerHeight;
+    return { x, y, value, item: series[index] };
+  });
+
+  const line = points.map((point) => `${point.x},${point.y}`).join(" ");
+  const area = `M ${paddingX} ${paddingY + innerHeight} L ${points.map((point) => `${point.x} ${point.y}`).join(" L ")} L ${paddingX + innerWidth} ${paddingY + innerHeight} Z`;
+  const latest = points[points.length - 1];
+
+  return `
+    <div class="trend-chart">
+      <div class="trend-chart-head">
+        <strong>${escapeHTML(options.title)}</strong>
+        <span>Latest: ${escapeHTML(options.valueFormatter(latest.value))}</span>
+      </div>
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHTML(options.title)}">
+        <defs>
+          <linearGradient id="trendFill" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="#f77f00" stop-opacity="0.28"></stop>
+            <stop offset="100%" stop-color="#f77f00" stop-opacity="0.02"></stop>
+          </linearGradient>
+        </defs>
+        <line x1="${paddingX}" y1="${paddingY + innerHeight}" x2="${paddingX + innerWidth}" y2="${paddingY + innerHeight}" stroke="#d9e2ec" stroke-width="2"></line>
+        <path d="${area}" fill="url(#trendFill)"></path>
+        <polyline fill="none" stroke="#f77f00" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" points="${line}"></polyline>
+        ${points.map((point) => `
+          <g>
+            <title>${formatBucketLabel(point.item.bucketStart, options.bucket)}: ${options.valueFormatter(point.value)}</title>
+            <circle cx="${point.x}" cy="${point.y}" r="5" fill="#14213d"></circle>
+          </g>
+        `).join("")}
+      </svg>
+      <div class="axis-labels">
+        <span>${escapeHTML(formatBucketLabel(series[0].bucketStart, options.bucket))}</span>
+        <span>${escapeHTML(formatBucketLabel(latest.item.bucketStart, options.bucket))}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderTrendSummaries(items) {
+  return `<div class="trend-summary-grid">${items.map((item) => `
+    <div class="trend-summary">
+      <span>${escapeHTML(item.label)}</span>
+      <strong>${escapeHTML(item.value)}</strong>
+    </div>
+  `).join("")}</div>`;
+}
+
 function escapeHTML(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -250,6 +358,9 @@ async function loadOverview() {
   const top = document.getElementById("overview-top");
   const thresholdNote = document.getElementById("overview-threshold");
   const form = document.getElementById("overview-filters");
+  const trendForm = document.getElementById("overview-trend-filters");
+  const trendTarget = document.getElementById("overview-trend");
+  const trendSummary = document.getElementById("overview-trend-summary");
   const params = new URLSearchParams(window.location.search);
   const query = new URLSearchParams();
   if (params.get("minQueryTimeSec")) {
@@ -265,6 +376,27 @@ async function loadOverview() {
         next.set("minQueryTimeSec", value);
       } else {
         next.delete("minQueryTimeSec");
+      }
+      window.location.search = next.toString();
+    });
+  }
+  if (trendForm) {
+    trendForm.trendBucket.value = params.get("trendBucket") || "day";
+    trendForm.trendDays.value = params.get("trendDays") || "7";
+    trendForm.trendDbName.value = params.get("trendDbName") || "";
+    syncTrendDayOptions(trendForm.trendDays, trendForm.trendBucket.value);
+    trendForm.trendBucket.addEventListener("change", () => {
+      syncTrendDayOptions(trendForm.trendDays, trendForm.trendBucket.value);
+    });
+    trendForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const next = new URLSearchParams(window.location.search);
+      next.set("trendBucket", trendForm.trendBucket.value);
+      next.set("trendDays", trendForm.trendDays.value);
+      if (trendForm.trendDbName.value.trim()) {
+        next.set("trendDbName", trendForm.trendDbName.value.trim());
+      } else {
+        next.delete("trendDbName");
       }
       window.location.search = next.toString();
     });
@@ -288,9 +420,52 @@ async function loadOverview() {
 
   if (!data.topFingerprints || data.topFingerprints.length === 0) {
     top.innerHTML = `<div class="empty">${escapeHTML(sourceStateMessage("No slow SQL data has been ingested yet for this source."))}</div>`;
-    return;
+  } else {
+    top.innerHTML = `<div class="list">${data.topFingerprints.map((item) => renderFingerprintCard(item, query.toString())).join("")}</div>`;
   }
-  top.innerHTML = `<div class="list">${data.topFingerprints.map((item) => renderFingerprintCard(item, query.toString())).join("")}</div>`;
+
+  if (trendTarget) {
+    const trendQuery = new URLSearchParams();
+    const trendBucket = trendForm ? trendForm.trendBucket.value : (params.get("trendBucket") || "day");
+    const trendDays = trendForm ? trendForm.trendDays.value : (params.get("trendDays") || "7");
+    const trendDbName = trendForm ? trendForm.trendDbName.value.trim() : (params.get("trendDbName") || "");
+    trendQuery.set("bucket", trendBucket);
+    trendQuery.set("days", trendDays);
+    if (trendDbName) {
+      trendQuery.set("dbName", trendDbName);
+    }
+    if (params.get("minQueryTimeSec")) {
+      trendQuery.set("minQueryTimeSec", params.get("minQueryTimeSec"));
+    }
+
+    try {
+      const trends = await fetchJSON("/api/dashboard/trends?" + trendQuery.toString());
+      if (trendSummary) {
+        trendSummary.textContent = `${trends.bucket} buckets over ${trends.days} day(s)`;
+      }
+      const totals = summarizeSeries(trends.series, "totalQueryTimeSec");
+      const recordTotals = summarizeSeries(trends.series, "totalRecords");
+      trendTarget.innerHTML = `
+        <div class="trend-panel">
+          ${renderTrendChart(trends.series, {
+            title: "Total query time trend",
+            valueKey: "totalQueryTimeSec",
+            valueFormatter: formatSeconds,
+            bucket: trends.bucket,
+            emptyMessage: "No qualifying trend data exists for the current window and filters."
+          })}
+          ${renderTrendSummaries([
+            { label: "Window total query time", value: formatSeconds(totals.total) },
+            { label: "Peak bucket query time", value: formatSeconds(totals.max) },
+            { label: "Window total records", value: String(recordTotals.total) },
+            { label: "Database scope", value: trends.dbName || "All databases" }
+          ])}
+        </div>
+      `;
+    } catch (error) {
+      trendTarget.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+    }
+  }
 }
 
 async function loadFingerprints(params = new URLSearchParams(window.location.search)) {
@@ -346,6 +521,9 @@ async function loadDetail() {
   const records = document.getElementById("fingerprint-records");
   const thresholdNote = document.getElementById("detail-threshold");
   const form = document.getElementById("detail-filters");
+  const trendTarget = document.getElementById("fingerprint-trend");
+  const trendSummary = document.getElementById("detail-trend-summary");
+  const trendForm = document.getElementById("detail-trend-filters");
   if (!id) {
     detail.innerHTML = `<div class="empty">Missing fingerprint id.</div>`;
     return;
@@ -362,6 +540,21 @@ async function loadDetail() {
       } else {
         next.delete("minQueryTimeSec");
       }
+      window.location.search = next.toString();
+    });
+  }
+  if (trendForm) {
+    trendForm.trendBucket.value = params.get("trendBucket") || "day";
+    trendForm.trendDays.value = params.get("trendDays") || "7";
+    syncTrendDayOptions(trendForm.trendDays, trendForm.trendBucket.value);
+    trendForm.trendBucket.addEventListener("change", () => {
+      syncTrendDayOptions(trendForm.trendDays, trendForm.trendBucket.value);
+    });
+    trendForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const next = new URLSearchParams(window.location.search);
+      next.set("trendBucket", trendForm.trendBucket.value);
+      next.set("trendDays", trendForm.trendDays.value);
       window.location.search = next.toString();
     });
   }
@@ -413,20 +606,57 @@ async function loadDetail() {
   const data = await fetchJSON(`/api/slow-sql/fingerprints/${id}/records?${recordParams.toString()}`);
   if (!data.items || data.items.length === 0) {
     records.innerHTML = `<div class="empty">${escapeHTML(sourceStateMessage("No sample records are available for this fingerprint yet."))}</div>`;
-    return;
+  } else {
+    records.innerHTML = `<div class="list">${data.items.map((item) => `
+        <article class="item">
+          <div class="meta">
+            <span>Occurred: ${formatDate(item.occurredAt)}</span>
+            <span>DB: ${escapeHTML(item.dbName || "n/a")}</span>
+            <span>User: ${escapeHTML(item.userName || "n/a")}</span>
+            <span>Host: ${escapeHTML(item.clientHost || "n/a")}</span>
+            <span>Query time: ${formatSeconds(item.queryTimeSec)}</span>
+          </div>
+          <pre>${escapeHTML(item.rawSql)}</pre>
+        </article>
+    `).join("")}</div>`;
   }
-  records.innerHTML = `<div class="list">${data.items.map((item) => `
-      <article class="item">
-        <div class="meta">
-          <span>Occurred: ${formatDate(item.occurredAt)}</span>
-          <span>DB: ${escapeHTML(item.dbName || "n/a")}</span>
-          <span>User: ${escapeHTML(item.userName || "n/a")}</span>
-          <span>Host: ${escapeHTML(item.clientHost || "n/a")}</span>
-          <span>Query time: ${formatSeconds(item.queryTimeSec)}</span>
+
+  if (trendTarget) {
+    const trendQuery = new URLSearchParams({
+      bucket: trendForm ? trendForm.trendBucket.value : (params.get("trendBucket") || "day"),
+      days: trendForm ? trendForm.trendDays.value : (params.get("trendDays") || "7")
+    });
+    if (params.get("minQueryTimeSec")) {
+      trendQuery.set("minQueryTimeSec", params.get("minQueryTimeSec"));
+    }
+    try {
+      const trends = await fetchJSON(`/api/slow-sql/fingerprints/${id}/trends?${trendQuery.toString()}`);
+      if (trendSummary) {
+        trendSummary.textContent = `${trends.bucket} buckets over ${trends.days} day(s)`;
+      }
+      const totals = summarizeSeries(trends.series, "totalQueryTimeSec");
+      const countTotals = summarizeSeries(trends.series, "totalCount");
+      trendTarget.innerHTML = `
+        <div class="trend-panel">
+          ${renderTrendChart(trends.series, {
+            title: "Fingerprint query time trend",
+            valueKey: "totalQueryTimeSec",
+            valueFormatter: formatSeconds,
+            bucket: trends.bucket,
+            emptyMessage: "No qualifying trend data exists for this fingerprint under the current filters."
+          })}
+          ${renderTrendSummaries([
+            { label: "Window total query time", value: formatSeconds(totals.total) },
+            { label: "Peak bucket query time", value: formatSeconds(totals.max) },
+            { label: "Window total executions", value: String(countTotals.total) },
+            { label: "Threshold", value: formatThreshold(trends.activeMinQueryTimeSec) }
+          ])}
         </div>
-        <pre>${escapeHTML(item.rawSql)}</pre>
-      </article>
-  `).join("")}</div>`;
+      `;
+    } catch (error) {
+      trendTarget.innerHTML = `<div class="empty">${escapeHTML(error.message)}</div>`;
+    }
+  }
 }
 
 async function boot() {
@@ -447,7 +677,9 @@ async function boot() {
 if (globalThis.__SSO_TEST__) {
   globalThis.__SSO_TEST__ = {
     formatBytes,
+    renderTrendChart,
     renderSourceContext,
+    syncTrendDayOptions,
     sourceStateMessage,
     setSourceContext(value) {
       sourceContext = value;

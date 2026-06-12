@@ -19,12 +19,35 @@ func (stubQueryService) GetOverview(context.Context, model.OverviewParams) (mode
 	return model.Overview{TotalRecords: 1, TotalFingerprints: 1, LastIngestedAt: &now}, nil
 }
 
+func (stubQueryService) GetDashboardTrends(context.Context, model.TrendParams) (model.DashboardTrends, error) {
+	now := time.Now().UTC()
+	return model.DashboardTrends{
+		Bucket:      model.TrendBucketDay,
+		Days:        7,
+		WindowStart: now.Add(-6 * 24 * time.Hour),
+		WindowEnd:   now,
+		Series:      []model.DashboardTrendBucket{{BucketStart: now.Add(-24 * time.Hour), TotalRecords: 1}},
+	}, nil
+}
+
 func (stubQueryService) ListFingerprints(context.Context, model.ListFingerprintsParams) (model.PaginatedFingerprints, error) {
 	return model.PaginatedFingerprints{Items: []model.FingerprintRecordView{{Fingerprint: model.Fingerprint{ID: 1, Hash: "abc"}}}}, nil
 }
 
 func (stubQueryService) GetFingerprint(context.Context, int64, model.GetFingerprintParams) (*model.FingerprintRecordView, error) {
 	return &model.FingerprintRecordView{Fingerprint: model.Fingerprint{ID: 1, Hash: "abc"}}, nil
+}
+
+func (stubQueryService) GetFingerprintTrends(_ context.Context, id int64, _ model.TrendParams) (model.FingerprintTrends, error) {
+	now := time.Now().UTC()
+	return model.FingerprintTrends{
+		FingerprintID: id,
+		Bucket:        model.TrendBucketDay,
+		Days:          7,
+		WindowStart:   now.Add(-6 * 24 * time.Hour),
+		WindowEnd:     now,
+		Series:        []model.FingerprintTrendBucket{{BucketStart: now.Add(-24 * time.Hour), TotalCount: 1}},
+	}, nil
 }
 
 func (stubQueryService) ListFingerprintRecords(context.Context, int64, model.ListFingerprintRecordsParams) (model.PaginatedRecords, error) {
@@ -109,14 +132,21 @@ func TestSourceStatusEndpoints(t *testing.T) {
 type captureQueryService struct {
 	stubQueryService
 	overviewParams           model.OverviewParams
+	dashboardTrendParams     model.TrendParams
 	fingerprintListParams    model.ListFingerprintsParams
 	fingerprintDetailParams  model.GetFingerprintParams
+	fingerprintTrendParams   model.TrendParams
 	fingerprintRecordsParams model.ListFingerprintRecordsParams
 }
 
 func (c *captureQueryService) GetOverview(ctx context.Context, params model.OverviewParams) (model.Overview, error) {
 	c.overviewParams = params
 	return c.stubQueryService.GetOverview(ctx, params)
+}
+
+func (c *captureQueryService) GetDashboardTrends(ctx context.Context, params model.TrendParams) (model.DashboardTrends, error) {
+	c.dashboardTrendParams = params
+	return c.stubQueryService.GetDashboardTrends(ctx, params)
 }
 
 func (c *captureQueryService) ListFingerprints(ctx context.Context, params model.ListFingerprintsParams) (model.PaginatedFingerprints, error) {
@@ -127,6 +157,11 @@ func (c *captureQueryService) ListFingerprints(ctx context.Context, params model
 func (c *captureQueryService) GetFingerprint(ctx context.Context, id int64, params model.GetFingerprintParams) (*model.FingerprintRecordView, error) {
 	c.fingerprintDetailParams = params
 	return c.stubQueryService.GetFingerprint(ctx, id, params)
+}
+
+func (c *captureQueryService) GetFingerprintTrends(ctx context.Context, id int64, params model.TrendParams) (model.FingerprintTrends, error) {
+	c.fingerprintTrendParams = params
+	return c.stubQueryService.GetFingerprintTrends(ctx, id, params)
 }
 
 func (c *captureQueryService) ListFingerprintRecords(ctx context.Context, id int64, params model.ListFingerprintRecordsParams) (model.PaginatedRecords, error) {
@@ -174,6 +209,37 @@ func TestThresholdQueryParamPropagation(t *testing.T) {
 				}
 			},
 		},
+		{
+			path: "/api/dashboard/trends?bucket=day&days=7&dbName=app&minQueryTimeSec=2",
+			check: func(t *testing.T) {
+				if service.dashboardTrendParams.Bucket != model.TrendBucketDay {
+					t.Fatalf("expected dashboard trend bucket day, got %q", service.dashboardTrendParams.Bucket)
+				}
+				if service.dashboardTrendParams.Days != 7 {
+					t.Fatalf("expected dashboard trend days 7, got %d", service.dashboardTrendParams.Days)
+				}
+				if service.dashboardTrendParams.DBName != "app" {
+					t.Fatalf("expected dashboard trend dbName app, got %q", service.dashboardTrendParams.DBName)
+				}
+				if service.dashboardTrendParams.MinQueryTimeSec != 2 {
+					t.Fatalf("expected dashboard trend threshold 2, got %v", service.dashboardTrendParams.MinQueryTimeSec)
+				}
+			},
+		},
+		{
+			path: "/api/slow-sql/fingerprints/1/trends?bucket=hour&days=2&minQueryTimeSec=6",
+			check: func(t *testing.T) {
+				if service.fingerprintTrendParams.Bucket != model.TrendBucketHour {
+					t.Fatalf("expected fingerprint trend bucket hour, got %q", service.fingerprintTrendParams.Bucket)
+				}
+				if service.fingerprintTrendParams.Days != 2 {
+					t.Fatalf("expected fingerprint trend days 2, got %d", service.fingerprintTrendParams.Days)
+				}
+				if service.fingerprintTrendParams.MinQueryTimeSec != 6 {
+					t.Fatalf("expected fingerprint trend threshold 6, got %v", service.fingerprintTrendParams.MinQueryTimeSec)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -199,5 +265,26 @@ func TestThresholdDefaultsToServerConfig(t *testing.T) {
 	}
 	if service.overviewParams.MinQueryTimeSec != 1.25 {
 		t.Fatalf("expected default threshold 1.25, got %v", service.overviewParams.MinQueryTimeSec)
+	}
+}
+
+func TestTrendValidationReturnsBadRequest(t *testing.T) {
+	service := &captureQueryService{}
+	server := NewServer(service, "../../web", 1)
+
+	cases := []string{
+		"/api/dashboard/trends?bucket=week",
+		"/api/dashboard/trends?bucket=hour&days=30",
+		"/api/dashboard/trends?days=0",
+		"/api/slow-sql/fingerprints/1/trends?days=oops",
+	}
+
+	for _, path := range cases {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400 for %s, got %d", path, recorder.Code)
+		}
 	}
 }

@@ -34,6 +34,20 @@ Examples:
 
 If the parameter is omitted, the server uses `SSO_ANALYSIS_MIN_QUERY_TIME_SEC`.
 
+### Trend windows
+
+Trend endpoints support:
+
+- `bucket=day`
+- `bucket=hour`
+- `days=1..30`
+
+Additional bound:
+
+- hourly trends require `days <= 7`
+
+Trend responses return chart-ready bucket arrays ordered from oldest to newest.
+
 ### Error response
 
 ```json
@@ -134,7 +148,44 @@ Response fields:
 - `page`
 - `pageSize`
 
-## 7. Fingerprint detail
+## 7. Dashboard trends
+
+```http
+GET /api/dashboard/trends
+GET /api/dashboard/trends?bucket=day&days=7&dbName=sso_demo_app&minQueryTimeSec=1
+```
+
+Query parameters:
+
+- `bucket`
+  - `day`
+  - `hour`
+- `days`
+  - `1..30`
+  - when `bucket=hour`, maximum is `7`
+- `dbName`
+- `minQueryTimeSec`
+
+Response fields:
+
+- `activeMinQueryTimeSec`
+- `bucket`
+- `days`
+- `dbName`
+- `windowStart`
+- `windowEnd`
+- `series`
+
+Each `series[]` item contains:
+
+- `bucketStart`
+- `totalRecords`
+- `totalFingerprints`
+- `totalQueryTimeSec`
+- `avgQueryTimeSec`
+- `maxQueryTimeSec`
+
+## 8. Fingerprint detail
 
 ```http
 GET /api/slow-sql/fingerprints/:id
@@ -153,7 +204,44 @@ Returns one fingerprint view with threshold-aware aggregate fields such as:
 
 If the fingerprint has no qualifying records under the active threshold, the endpoint returns `404`.
 
-## 8. Fingerprint records
+## 9. Fingerprint trends
+
+```http
+GET /api/slow-sql/fingerprints/:id/trends
+GET /api/slow-sql/fingerprints/:id/trends?bucket=hour&days=2&minQueryTimeSec=1
+```
+
+Query parameters:
+
+- `bucket`
+  - `day`
+  - `hour`
+- `days`
+  - `1..30`
+  - when `bucket=hour`, maximum is `7`
+- `minQueryTimeSec`
+
+Response fields:
+
+- `activeMinQueryTimeSec`
+- `fingerprintId`
+- `bucket`
+- `days`
+- `windowStart`
+- `windowEnd`
+- `series`
+
+Each `series[]` item contains:
+
+- `bucketStart`
+- `totalCount`
+- `totalQueryTimeSec`
+- `avgQueryTimeSec`
+- `maxQueryTimeSec`
+
+If the fingerprint id does not exist for the observed source, the endpoint returns `404`.
+
+## 10. Fingerprint records
 
 ```http
 GET /api/slow-sql/fingerprints/:id/records
@@ -182,5 +270,6 @@ Response fields:
 
 ## Notes for UI consumers
 
-- `activeMinQueryTimeSec` is returned by overview, list, detail, and records responses so the frontend can show the effective threshold to the user.
+- `activeMinQueryTimeSec` is returned by overview, list, detail, records, and trend responses so the frontend can show the effective threshold to the user.
 - `minQueryTimeSec` filters analysis output only. It does not change what the collector stores in `slow_query_records`.
+- Trend series include zero-valued buckets for empty time slices so charts can render continuous windows.

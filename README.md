@@ -20,6 +20,7 @@ The project is not positioned as a universal managed-cloud slow-log collector. I
 - normalizes SQL into fingerprints
 - stores raw records and aggregate stats in a separate analysis schema
 - serves a web UI for overview, fingerprint list, detail, and raw record drill-down
+- serves time-series trend analytics for the dashboard and individual fingerprints
 - exposes runtime status for source info, collector status, acquisition status, and discovery status
 
 ## Architecture
@@ -167,6 +168,21 @@ Example:
 - Slow SQL Observer can analyze by default at `1.0s` so the main UI stays focused on materially slow statements.
 - API and UI requests can override the default with `minQueryTimeSec`.
 
+## Trend analytics
+
+The project now includes lightweight time-series analytics on top of the existing snapshot views.
+
+- overview page
+  shows a trend chart for recent slow-SQL pressure
+- fingerprint detail page
+  shows how one normalized SQL changes over time
+- trend APIs
+  support `bucket=day` or `bucket=hour`
+- recent-window bounds
+  support `days=1` through `days=30`, with hourly trends limited to `days <= 7`
+
+Trend endpoints honor the same analysis-layer threshold model as the overview and ranking pages, so `minQueryTimeSec` keeps snapshot views and charts aligned.
+
 ## Quick start
 
 ### Option A: sample log
@@ -250,7 +266,9 @@ Suggested validation flow:
 
 5. Verify data in:
    - `/api/dashboard/overview`
+   - `/api/dashboard/trends?bucket=day&days=7`
    - `/api/slow-sql/fingerprints`
+   - `/api/slow-sql/fingerprints/:id/trends?bucket=day&days=7`
    - `/api/slow-sql/fingerprints/:id/records`
    - optionally compare `/api/slow-sql/fingerprints?minQueryTimeSec=0.2` and `/api/slow-sql/fingerprints?minQueryTimeSec=1`
 
@@ -295,15 +313,19 @@ Current HTTP routes:
 - `GET /api/acquisition/status`
 - `GET /api/discovery/status`
 - `GET /api/dashboard/overview`
+- `GET /api/dashboard/trends`
 - `GET /api/slow-sql/fingerprints`
 - `GET /api/slow-sql/fingerprints/:id`
+- `GET /api/slow-sql/fingerprints/:id/trends`
 - `GET /api/slow-sql/fingerprints/:id/records`
 
 Threshold-aware examples:
 
 - `GET /api/dashboard/overview?minQueryTimeSec=1`
+- `GET /api/dashboard/trends?bucket=day&days=7&minQueryTimeSec=1`
 - `GET /api/slow-sql/fingerprints?minQueryTimeSec=1`
 - `GET /api/slow-sql/fingerprints/:id?minQueryTimeSec=1`
+- `GET /api/slow-sql/fingerprints/:id/trends?bucket=hour&days=2&minQueryTimeSec=1`
 - `GET /api/slow-sql/fingerprints/:id/records?minQueryTimeSec=1`
 
 Detailed field-level API documentation:
@@ -323,5 +345,7 @@ Archived work:
 
 - `openspec/changes/archive/2026-06-09-build-v1-slow-log-pipeline/`
 - `openspec/changes/archive/2026-06-09-add-source-aware-v2/`
+- `openspec/changes/archive/2026-06-12-add-analysis-threshold-filter/`
+- `openspec/changes/archive/2026-06-12-add-trend-analytics-dashboard/`
 
-Applied and completed work in the current codebase includes the source-aware and acquisition layers discussed in later OpenSpec changes, even though not every explored direction is intended to ship as a broader product promise.
+Applied and completed work in the current codebase includes the source-aware, acquisition, analysis-threshold, and trend-analytics layers discussed across the archived OpenSpec changes, even though not every explored direction is intended to ship as a broader product promise.

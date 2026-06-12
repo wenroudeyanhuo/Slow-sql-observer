@@ -1055,6 +1055,62 @@ func (s *Store) GetOverview(ctx context.Context, params model.OverviewParams) (m
 	return overview, nil
 }
 
+func (s *Store) GetDashboardTrends(ctx context.Context, params model.TrendParams) (model.DashboardTrends, error) {
+	sourceID, err := s.activeSourceID()
+	if err != nil {
+		return model.DashboardTrends{}, err
+	}
+
+	minQueryTimeSec := normalizeMinQueryTimeSec(params.MinQueryTimeSec)
+	windowStart, windowEnd := trendWindowBounds(params.Bucket, params.Days, time.Now().UTC())
+	response := model.DashboardTrends{
+		ActiveMinQueryTimeSec: minQueryTimeSec,
+		Bucket:                params.Bucket,
+		Days:                  params.Days,
+		DBName:                strings.TrimSpace(params.DBName),
+		WindowStart:           windowStart,
+		WindowEnd:             windowEnd,
+	}
+
+	query, args := buildDashboardTrendQuery(sourceID, response.DBName, minQueryTimeSec, params.Bucket, windowStart, windowEnd)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return model.DashboardTrends{}, err
+	}
+	defer rows.Close()
+
+	seriesByBucket := make(map[time.Time]model.DashboardTrendBucket)
+	for rows.Next() {
+		var rawBucket string
+		var item model.DashboardTrendBucket
+		if err := rows.Scan(
+			&rawBucket,
+			&item.TotalRecords,
+			&item.TotalFingerprints,
+			&item.TotalQueryTimeSec,
+			&item.AvgQueryTimeSec,
+			&item.MaxQueryTimeSec,
+		); err != nil {
+			return model.DashboardTrends{}, err
+		}
+		item.BucketStart = mustParseTrendBucket(rawBucket)
+		seriesByBucket[item.BucketStart] = item
+	}
+	if err := rows.Err(); err != nil {
+		return model.DashboardTrends{}, err
+	}
+
+	response.Series = make([]model.DashboardTrendBucket, 0, trendBucketCount(params.Bucket, params.Days))
+	for cursor := windowStart; cursor.Before(windowEnd); cursor = nextTrendBucket(cursor, params.Bucket) {
+		if item, ok := seriesByBucket[cursor]; ok {
+			response.Series = append(response.Series, item)
+			continue
+		}
+		response.Series = append(response.Series, model.DashboardTrendBucket{BucketStart: cursor})
+	}
+	return response, nil
+}
+
 func (s *Store) ListFingerprints(ctx context.Context, params model.ListFingerprintsParams) (model.PaginatedFingerprints, error) {
 	sourceID, err := s.activeSourceID()
 	if err != nil {
@@ -1162,6 +1218,69 @@ func (s *Store) GetFingerprint(ctx context.Context, id int64, params model.GetFi
 	}
 	view.ActiveMinQueryTimeSec = minQueryTimeSec
 	return &view, nil
+}
+
+func (s *Store) GetFingerprintTrends(ctx context.Context, id int64, params model.TrendParams) (model.FingerprintTrends, error) {
+	sourceID, err := s.activeSourceID()
+	if err != nil {
+		return model.FingerprintTrends{}, err
+	}
+
+	var exists int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fingerprints WHERE source_id = ? AND id = ?`, sourceID, id).Scan(&exists); err != nil {
+		return model.FingerprintTrends{}, err
+	}
+	if exists == 0 {
+		return model.FingerprintTrends{}, sql.ErrNoRows
+	}
+
+	minQueryTimeSec := normalizeMinQueryTimeSec(params.MinQueryTimeSec)
+	windowStart, windowEnd := trendWindowBounds(params.Bucket, params.Days, time.Now().UTC())
+	response := model.FingerprintTrends{
+		ActiveMinQueryTimeSec: minQueryTimeSec,
+		FingerprintID:         id,
+		Bucket:                params.Bucket,
+		Days:                  params.Days,
+		WindowStart:           windowStart,
+		WindowEnd:             windowEnd,
+	}
+
+	query, args := buildFingerprintTrendQuery(sourceID, id, minQueryTimeSec, params.Bucket, windowStart, windowEnd)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return model.FingerprintTrends{}, err
+	}
+	defer rows.Close()
+
+	seriesByBucket := make(map[time.Time]model.FingerprintTrendBucket)
+	for rows.Next() {
+		var rawBucket string
+		var item model.FingerprintTrendBucket
+		if err := rows.Scan(
+			&rawBucket,
+			&item.TotalCount,
+			&item.TotalQueryTimeSec,
+			&item.AvgQueryTimeSec,
+			&item.MaxQueryTimeSec,
+		); err != nil {
+			return model.FingerprintTrends{}, err
+		}
+		item.BucketStart = mustParseTrendBucket(rawBucket)
+		seriesByBucket[item.BucketStart] = item
+	}
+	if err := rows.Err(); err != nil {
+		return model.FingerprintTrends{}, err
+	}
+
+	response.Series = make([]model.FingerprintTrendBucket, 0, trendBucketCount(params.Bucket, params.Days))
+	for cursor := windowStart; cursor.Before(windowEnd); cursor = nextTrendBucket(cursor, params.Bucket) {
+		if item, ok := seriesByBucket[cursor]; ok {
+			response.Series = append(response.Series, item)
+			continue
+		}
+		response.Series = append(response.Series, model.FingerprintTrendBucket{BucketStart: cursor})
+	}
+	return response, nil
 }
 
 func (s *Store) ListFingerprintRecords(ctx context.Context, fingerprintID int64, params model.ListFingerprintRecordsParams) (model.PaginatedRecords, error) {
@@ -1700,6 +1819,110 @@ func buildFingerprintAggregationQuery(sourceID int64, dbName string, minQueryTim
 		WHERE ` + strings.Join(clauses, " AND ") + `
 		GROUP BY r.fingerprint_id`
 	return query, args
+}
+
+func buildDashboardTrendQuery(sourceID int64, dbName string, minQueryTimeSec float64, bucket string, windowStart, windowEnd time.Time) (string, []any) {
+	clauses := []string{"source_id = ?", "occurred_at >= ?", "occurred_at < ?"}
+	args := []any{sourceID, windowStart, windowEnd}
+	if minQueryTimeSec > 0 {
+		clauses = append(clauses, "query_time_sec >= ?")
+		args = append(args, minQueryTimeSec)
+	}
+	if strings.TrimSpace(dbName) != "" {
+		clauses = append(clauses, "db_name = ?")
+		args = append(args, dbName)
+	}
+
+	query := `
+		SELECT
+			` + trendBucketExpression(bucket) + ` AS bucket_start,
+			COUNT(*) AS total_records,
+			COUNT(DISTINCT fingerprint_id) AS total_fingerprints,
+			COALESCE(SUM(query_time_sec), 0) AS total_query_time_sec,
+			COALESCE(AVG(query_time_sec), 0) AS avg_query_time_sec,
+			COALESCE(MAX(query_time_sec), 0) AS max_query_time_sec
+		FROM slow_query_records
+		WHERE ` + strings.Join(clauses, " AND ") + `
+		GROUP BY bucket_start
+		ORDER BY bucket_start ASC`
+	return query, args
+}
+
+func buildFingerprintTrendQuery(sourceID, fingerprintID int64, minQueryTimeSec float64, bucket string, windowStart, windowEnd time.Time) (string, []any) {
+	clauses := []string{"source_id = ?", "fingerprint_id = ?", "occurred_at >= ?", "occurred_at < ?"}
+	args := []any{sourceID, fingerprintID, windowStart, windowEnd}
+	if minQueryTimeSec > 0 {
+		clauses = append(clauses, "query_time_sec >= ?")
+		args = append(args, minQueryTimeSec)
+	}
+
+	query := `
+		SELECT
+			` + trendBucketExpression(bucket) + ` AS bucket_start,
+			COUNT(*) AS total_count,
+			COALESCE(SUM(query_time_sec), 0) AS total_query_time_sec,
+			COALESCE(AVG(query_time_sec), 0) AS avg_query_time_sec,
+			COALESCE(MAX(query_time_sec), 0) AS max_query_time_sec
+		FROM slow_query_records
+		WHERE ` + strings.Join(clauses, " AND ") + `
+		GROUP BY bucket_start
+		ORDER BY bucket_start ASC`
+	return query, args
+}
+
+func trendBucketExpression(bucket string) string {
+	switch bucket {
+	case model.TrendBucketHour:
+		return `DATE_FORMAT(occurred_at, '%Y-%m-%d %H:00:00')`
+	default:
+		return `DATE_FORMAT(occurred_at, '%Y-%m-%d 00:00:00')`
+	}
+}
+
+func trendWindowBounds(bucket string, days int, now time.Time) (time.Time, time.Time) {
+	end := truncateTrendTime(now, bucket).Add(trendBucketDuration(bucket))
+	count := trendBucketCount(bucket, days)
+	start := end.Add(-time.Duration(count) * trendBucketDuration(bucket))
+	return start, end
+}
+
+func truncateTrendTime(value time.Time, bucket string) time.Time {
+	value = value.UTC()
+	switch bucket {
+	case model.TrendBucketHour:
+		return value.Truncate(time.Hour)
+	default:
+		return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+	}
+}
+
+func trendBucketDuration(bucket string) time.Duration {
+	if bucket == model.TrendBucketHour {
+		return time.Hour
+	}
+	return 24 * time.Hour
+}
+
+func trendBucketCount(bucket string, days int) int {
+	if bucket == model.TrendBucketHour {
+		return days * 24
+	}
+	return days
+}
+
+func nextTrendBucket(value time.Time, bucket string) time.Time {
+	if bucket == model.TrendBucketHour {
+		return value.Add(time.Hour)
+	}
+	return value.Add(24 * time.Hour)
+}
+
+func mustParseTrendBucket(value string) time.Time {
+	parsed, err := time.ParseInLocation("2006-01-02 15:04:05", value, time.UTC)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, definition string) error {

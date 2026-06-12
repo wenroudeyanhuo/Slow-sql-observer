@@ -36,7 +36,7 @@ The system SHALL allow API consumers to override the default analysis threshold 
 - **THEN** the response SHALL include records and aggregates whose `query_time_sec` is greater than or equal to `0.2`
 
 ### Requirement: Threshold-aware analysis endpoints
-The system SHALL apply the effective analysis threshold consistently to the overview, fingerprint list, fingerprint detail, and fingerprint records views so that users can investigate the same filtered slice of data end to end.
+The system SHALL apply the effective analysis threshold consistently to the overview, fingerprint list, fingerprint detail, fingerprint records, dashboard trends, and fingerprint trends views so that users can investigate the same filtered slice of data end to end.
 
 #### Scenario: Fingerprint list only ranks above-threshold statements
 - **WHEN** a fingerprint has only records below the effective analysis threshold
@@ -45,6 +45,14 @@ The system SHALL apply the effective analysis threshold consistently to the over
 #### Scenario: Fingerprint records respect the same threshold
 - **WHEN** a client opens a fingerprint detail flow with an effective analysis threshold
 - **THEN** the fingerprint records response SHALL include only records whose `query_time_sec` is greater than or equal to that threshold
+
+#### Scenario: Dashboard trends respect the same threshold
+- **WHEN** a client requests dashboard trends with an effective analysis threshold
+- **THEN** the trend buckets SHALL include only records whose `query_time_sec` is greater than or equal to that threshold
+
+#### Scenario: Fingerprint trends respect the same threshold
+- **WHEN** a client requests fingerprint trends with an effective analysis threshold
+- **THEN** the trend buckets SHALL include only records for that fingerprint whose `query_time_sec` is greater than or equal to that threshold
 
 ### Requirement: The effective threshold is documented and visible
 The system SHALL document the difference between MySQL collection threshold and Slow SQL Observer analysis threshold. The web UI SHALL expose the active threshold so users can understand why some collected records are not shown in default rankings.

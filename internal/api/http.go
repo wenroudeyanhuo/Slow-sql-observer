@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path"
@@ -17,8 +18,10 @@ import (
 
 type QueryService interface {
 	GetOverview(ctx context.Context, params model.OverviewParams) (model.Overview, error)
+	GetDashboardTrends(ctx context.Context, params model.TrendParams) (model.DashboardTrends, error)
 	ListFingerprints(ctx context.Context, params model.ListFingerprintsParams) (model.PaginatedFingerprints, error)
 	GetFingerprint(ctx context.Context, id int64, params model.GetFingerprintParams) (*model.FingerprintRecordView, error)
+	GetFingerprintTrends(ctx context.Context, id int64, params model.TrendParams) (model.FingerprintTrends, error)
 	ListFingerprintRecords(ctx context.Context, fingerprintID int64, params model.ListFingerprintRecordsParams) (model.PaginatedRecords, error)
 	GetSource(ctx context.Context) (*model.Source, error)
 	GetCollectorStatus(ctx context.Context) (*model.CollectorStatus, error)
@@ -44,6 +47,7 @@ func NewServer(store QueryService, webDir string, defaultMinQueryTimeSec float64
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/dashboard/overview", s.handleOverview)
+	mux.HandleFunc("/api/dashboard/trends", s.handleDashboardTrends)
 	mux.HandleFunc("/api/source", s.handleSource)
 	mux.HandleFunc("/api/collector/status", s.handleCollectorStatus)
 	mux.HandleFunc("/api/acquisition/status", s.handleAcquisitionStatus)
@@ -79,6 +83,20 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, overview)
+}
+
+func (s *Server) handleDashboardTrends(w http.ResponseWriter, r *http.Request) {
+	params, err := s.resolveTrendParams(r, true)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	trends, err := s.store.GetDashboardTrends(r.Context(), params)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, trends)
 }
 
 func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
@@ -165,6 +183,10 @@ func (s *Server) handleFingerprintSubroutes(w http.ResponseWriter, r *http.Reque
 		s.handleFingerprintRecords(w, r, id)
 		return
 	}
+	if len(parts) > 1 && parts[1] == "trends" {
+		s.handleFingerprintTrends(w, r, id)
+		return
+	}
 	s.handleFingerprintDetail(w, r, id)
 }
 
@@ -181,6 +203,24 @@ func (s *Server) handleFingerprintDetail(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleFingerprintTrends(w http.ResponseWriter, r *http.Request, id int64) {
+	params, err := s.resolveTrendParams(r, false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	trends, err := s.store.GetFingerprintTrends(r.Context(), id, params)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, trends)
 }
 
 func (s *Server) handleFingerprintRecords(w http.ResponseWriter, r *http.Request, id int64) {
@@ -232,6 +272,42 @@ func (s *Server) resolveMinQueryTimeSec(r *http.Request) float64 {
 		return s.defaultMinQueryTimeSec
 	}
 	return normalizeMinQueryTimeSec(value)
+}
+
+func (s *Server) resolveTrendParams(r *http.Request, allowDBName bool) (model.TrendParams, error) {
+	bucket := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("bucket")))
+	if bucket == "" {
+		bucket = model.TrendBucketDay
+	}
+	if bucket != model.TrendBucketDay && bucket != model.TrendBucketHour {
+		return model.TrendParams{}, fmt.Errorf("unsupported bucket %q; supported values are %q and %q", bucket, model.TrendBucketDay, model.TrendBucketHour)
+	}
+
+	daysRaw := strings.TrimSpace(r.URL.Query().Get("days"))
+	days := 7
+	if daysRaw != "" {
+		parsed, err := strconv.Atoi(daysRaw)
+		if err != nil {
+			return model.TrendParams{}, fmt.Errorf("invalid days value %q", daysRaw)
+		}
+		days = parsed
+	}
+	if days <= 0 || days > 30 {
+		return model.TrendParams{}, fmt.Errorf("unsupported days %d; supported range is 1-30", days)
+	}
+	if bucket == model.TrendBucketHour && days > 7 {
+		return model.TrendParams{}, fmt.Errorf("unsupported days %d for hourly trends; supported range is 1-7", days)
+	}
+
+	params := model.TrendParams{
+		Bucket:          bucket,
+		Days:            days,
+		MinQueryTimeSec: s.resolveMinQueryTimeSec(r),
+	}
+	if allowDBName {
+		params.DBName = strings.TrimSpace(r.URL.Query().Get("dbName"))
+	}
+	return params, nil
 }
 
 func normalizeMinQueryTimeSec(value float64) float64 {

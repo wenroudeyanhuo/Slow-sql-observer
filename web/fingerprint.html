@@ -29,6 +29,28 @@
       <section class="card" id="fingerprint-detail"></section>
       <section class="card">
         <div class="section-head">
+          <div>
+            <h2>Fingerprint Trend</h2>
+            <p class="eyebrow" id="detail-trend-summary"></p>
+          </div>
+        </div>
+        <form id="detail-trend-filters" class="filters">
+          <select name="trendBucket">
+            <option value="day">Daily buckets</option>
+            <option value="hour">Hourly buckets</option>
+          </select>
+          <select name="trendDays">
+            <option value="1">1 day</option>
+            <option value="2">2 days</option>
+            <option value="7">7 days</option>
+            <option value="30">30 days</option>
+          </select>
+          <button type="submit">Update trend</button>
+        </form>
+        <div id="fingerprint-trend"></div>
+      </section>
+      <section class="card">
+        <div class="section-head">
           <h2>Sample Records</h2>
         </div>
         <div id="fingerprint-records"></div>
