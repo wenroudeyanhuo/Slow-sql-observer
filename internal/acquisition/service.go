@@ -35,6 +35,16 @@ func (s *Service) Acquire(ctx context.Context, source config.SourceConfig, check
 		return s.acquireLocal(ctx, source)
 	case model.LogModeSSHPull:
 		return s.acquireRemote(ctx, source, checkpoint)
+	case model.LogModeMySQLAuto:
+		// In mysql_auto mode, the collector service decides the effective mode
+		// and calls the appropriate method. If Acquire is called directly,
+		// return blocked to indicate discovery is required first.
+		return model.AcquisitionResult{
+			TransportMode:        model.LogModeMySQLAuto,
+			AcquisitionState:     model.AcquisitionStateBlocked,
+			RemoteAccessState:    model.SourceAccessUnknown,
+			BlockedConfiguration: true,
+		}, fmt.Errorf("mysql_auto mode requires discovery; use AcquireMySQLFile or table ingestion")
 	default:
 		return model.AcquisitionResult{
 			TransportMode:        source.LogMode,
@@ -45,10 +55,54 @@ func (s *Service) Acquire(ctx context.Context, source config.SourceConfig, check
 	}
 }
 
+// AcquireMySQLFile performs SSH-based file acquisition using a discovered remote file path.
+// This is used when mysql_auto resolves to mysql_file effective mode.
+func (s *Service) AcquireMySQLFile(ctx context.Context, source config.SourceConfig, discoveredFilePath string, checkpoint *model.AcquisitionCheckpoint) (model.AcquisitionResult, error) {
+	// Validate SSH prerequisites
+	if strings.TrimSpace(source.RemoteHost) == "" {
+		return blockedResult(model.EffectiveModeMySQLFile, "SSH remote host is not configured for mysql_file acquisition"), nil
+	}
+	if strings.TrimSpace(source.RemoteUser) == "" {
+		return blockedResult(model.EffectiveModeMySQLFile, "SSH remote user is not configured for mysql_file acquisition"), nil
+	}
+	if strings.TrimSpace(source.SSHPrivateKeyPath) == "" {
+		return blockedResult(model.EffectiveModeMySQLFile, "SSH private key is not configured for mysql_file acquisition"), nil
+	}
+	if strings.TrimSpace(source.SSHKnownHostsPath) == "" {
+		return blockedResult(model.EffectiveModeMySQLFile, "SSH known hosts is not configured for mysql_file acquisition"), nil
+	}
+	if strings.TrimSpace(discoveredFilePath) == "" {
+		return blockedResult(model.EffectiveModeMySQLFile, "discovered slow-log file path is empty"), nil
+	}
+
+	// Create an augmented source config with the discovered file path
+	augmented := source
+	augmented.RemoteSlowLogPath = discoveredFilePath
+	if strings.TrimSpace(augmented.LocalSpoolDir) == "" {
+		augmented.LocalSpoolDir = "./var/spool"
+	}
+
+	result, err := s.acquireRemote(ctx, augmented, checkpoint)
+	result.TransportMode = model.EffectiveModeMySQLFile
+	result.SourceLogPath = discoveredFilePath
+	return result, err
+}
+
+func blockedResult(mode string, message string) model.AcquisitionResult {
+	return model.AcquisitionResult{
+		TransportMode:        mode,
+		AcquisitionState:     model.AcquisitionStateBlocked,
+		RemoteAccessState:    model.SourceAccessUnknown,
+		BlockedConfiguration: true,
+		AcquisitionError:     fmt.Errorf("%s", message),
+	}
+}
+
 func (s *Service) acquireLocal(ctx context.Context, source config.SourceConfig) (model.AcquisitionResult, error) {
 	state, err := collector.StatFile(source.SlowLogPath)
 	if err != nil {
 		return model.AcquisitionResult{
+			SourceLogPath:     source.SlowLogPath,
 			ParsePath:         source.SlowLogPath,
 			TransportMode:     model.LogModeLocalFile,
 			RemoteAccessState: model.SourceAccessInaccessible,
@@ -56,6 +110,7 @@ func (s *Service) acquireLocal(ctx context.Context, source config.SourceConfig) 
 		}, err
 	}
 	return model.AcquisitionResult{
+		SourceLogPath:      source.SlowLogPath,
 		ParsePath:          source.SlowLogPath,
 		TransportMode:      model.LogModeLocalFile,
 		RemoteAccessState:  model.SourceAccessAccessible,
@@ -69,6 +124,7 @@ func (s *Service) acquireLocal(ctx context.Context, source config.SourceConfig) 
 func (s *Service) acquireRemote(ctx context.Context, source config.SourceConfig, checkpoint *model.AcquisitionCheckpoint) (model.AcquisitionResult, error) {
 	spoolPath := source.EffectiveParsePath()
 	result := model.AcquisitionResult{
+		SourceLogPath:    source.RemoteSlowLogPath,
 		ParsePath:        spoolPath,
 		SpoolPath:        spoolPath,
 		TransportMode:    model.LogModeSSHPull,

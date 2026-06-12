@@ -82,6 +82,22 @@ func (m *memoryIngestStore) CleanupExpiredRecords(_ context.Context, _ int64, _ 
 	return 3, nil
 }
 
+func (m *memoryIngestStore) GetDiscovery(_ context.Context, _ int64) (*model.SourceDiscovery, error) {
+	return nil, nil
+}
+
+func (m *memoryIngestStore) UpsertDiscovery(_ context.Context, _ model.SourceDiscovery) error {
+	return nil
+}
+
+func (m *memoryIngestStore) GetTableIngestionCheckpoint(_ context.Context, _ int64) (*model.TableIngestionCheckpoint, error) {
+	return nil, nil
+}
+
+func (m *memoryIngestStore) UpsertTableIngestionCheckpoint(_ context.Context, _ model.TableIngestionCheckpoint) error {
+	return nil
+}
+
 func TestCollectOnceProcessesSampleLog(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "sample-slow.log")
@@ -212,6 +228,10 @@ type fakeAcquisitionService struct {
 }
 
 func (f fakeAcquisitionService) Acquire(context.Context, config.SourceConfig, *model.AcquisitionCheckpoint) (model.AcquisitionResult, error) {
+	return f.result, f.err
+}
+
+func (f fakeAcquisitionService) AcquireMySQLFile(_ context.Context, _ config.SourceConfig, _ string, _ *model.AcquisitionCheckpoint) (model.AcquisitionResult, error) {
 	return f.result, f.err
 }
 

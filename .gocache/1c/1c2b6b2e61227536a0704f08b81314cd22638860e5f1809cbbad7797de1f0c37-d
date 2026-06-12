@@ -1,0 +1,3 @@
+./collector.go
+./file_identity_windows.go
+./collector_test.go

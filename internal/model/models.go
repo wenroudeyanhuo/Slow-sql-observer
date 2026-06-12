@@ -25,6 +25,15 @@ const (
 
 	LogModeLocalFile = "local_file"
 	LogModeSSHPull   = "ssh_pull"
+	LogModeMySQLAuto = "mysql_auto"
+
+	EffectiveModeMySQLFile  = "mysql_file"
+	EffectiveModeMySQLTable = "mysql_table"
+
+	DiscoveryStateUnknown = "unknown"
+	DiscoveryStateHealthy = "healthy"
+	DiscoveryStateBlocked = "blocked"
+	DiscoveryStateError   = "error"
 
 	InitialPositionStart = "start"
 	InitialPositionEnd   = "end"
@@ -49,6 +58,30 @@ type Source struct {
 	LocalSpoolMaxBytes    *int64    `json:"localSpoolMaxBytes"`
 	CreatedAt             time.Time `json:"createdAt"`
 	UpdatedAt             time.Time `json:"updatedAt"`
+}
+
+type SourceDiscovery struct {
+	SourceID            int64     `json:"sourceId"`
+	DiscoveryState      string    `json:"discoveryState"`
+	SlowLogEnabled      *bool     `json:"slowLogEnabled"`
+	DiscoveredLogOutput *string   `json:"discoveredLogOutput"`
+	DiscoveredFilePath  *string   `json:"discoveredFilePath"`
+	SourceVersion       *string   `json:"sourceVersion"`
+	SourceHost          *string   `json:"sourceHost"`
+	EffectiveAcqMode    *string   `json:"effectiveAcquisitionMode"`
+	DiagnosticMessage   *string   `json:"diagnosticMessage"`
+	DiscoveredAt        time.Time `json:"discoveredAt"`
+	UpdatedAt           time.Time `json:"updatedAt"`
+}
+
+type TableIngestionCheckpoint struct {
+	SourceID            int64     `json:"sourceId"`
+	LastStartTime       time.Time `json:"lastStartTime"`
+	LastThreadID        int64     `json:"lastThreadId"`
+	LastServerID        int64     `json:"lastServerId"`
+	LastRowIdentityHash string    `json:"lastRowIdentityHash"`
+	RowsIngested        int64     `json:"rowsIngested"`
+	UpdatedAt           time.Time `json:"updatedAt"`
 }
 
 type SourceMetadataUpdate struct {
@@ -225,19 +258,20 @@ type CollectResult struct {
 }
 
 type AcquisitionResult struct {
-	ParsePath             string
-	TransportMode         string
-	RemoteAccessState     string
-	RemoteFileIdentity    string
-	RemoteOffsetStart     int64
-	RemoteOffsetEnd       int64
-	SpoolPath             string
-	SpoolSizeBytes        int64
-	ShouldParse           bool
-	ShouldTruncate        bool
-	AcquisitionState      string
-	AcquisitionError      error
-	BlockedConfiguration  bool
+	SourceLogPath        string
+	ParsePath            string
+	TransportMode        string
+	RemoteAccessState    string
+	RemoteFileIdentity   string
+	RemoteOffsetStart    int64
+	RemoteOffsetEnd      int64
+	SpoolPath            string
+	SpoolSizeBytes       int64
+	ShouldParse          bool
+	ShouldTruncate       bool
+	AcquisitionState     string
+	AcquisitionError     error
+	BlockedConfiguration bool
 }
 
 func SourceKey(instanceName, slowLogPath string) string {

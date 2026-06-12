@@ -58,13 +58,19 @@ func Open(ctx context.Context, cfg config.AnalysisConfig, source *config.SourceC
 		db.Close()
 		return nil, err
 	}
+	// Run column structure migrations BEFORE ensureSource so that INSERT
+	// statements referencing new columns don't fail on older databases.
+	if err := store.migrateLegacyColumns(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if source != nil {
 		active, err := store.ensureSource(ctx, *source)
 		if err != nil {
 			db.Close()
 			return nil, err
 		}
-		if err := store.migrateLegacySourceTables(ctx, active); err != nil {
+		if err := store.migrateLegacySourceData(ctx, active); err != nil {
 			db.Close()
 			return nil, err
 		}
@@ -223,6 +229,32 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			CONSTRAINT fk_records_source FOREIGN KEY (source_id) REFERENCES sources(id),
 			CONSTRAINT fk_records_fingerprint FOREIGN KEY (fingerprint_id) REFERENCES fingerprints(id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS source_discoveries (
+			source_id BIGINT NOT NULL,
+			discovery_state VARCHAR(32) NOT NULL DEFAULT 'unknown',
+			slow_log_enabled BOOLEAN NULL,
+			discovered_log_output VARCHAR(64) NULL,
+			discovered_file_path VARCHAR(1024) NULL,
+			source_version VARCHAR(255) NULL,
+			source_host VARCHAR(255) NULL,
+			effective_acquisition_mode VARCHAR(32) NULL,
+			diagnostic_message TEXT NULL,
+			discovered_at DATETIME(6) NOT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			PRIMARY KEY (source_id),
+			CONSTRAINT fk_discovery_source FOREIGN KEY (source_id) REFERENCES sources(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS table_ingestion_checkpoints (
+			source_id BIGINT NOT NULL,
+			last_start_time DATETIME(6) NOT NULL,
+			last_thread_id BIGINT NOT NULL DEFAULT 0,
+			last_server_id BIGINT NOT NULL DEFAULT 0,
+			last_row_identity_hash CHAR(40) NOT NULL DEFAULT '',
+			rows_ingested BIGINT NOT NULL DEFAULT 0,
+			updated_at DATETIME(6) NOT NULL,
+			PRIMARY KEY (source_id),
+			CONSTRAINT fk_table_checkpoint_source FOREIGN KEY (source_id) REFERENCES sources(id)
+		)`,
 	}
 
 	for _, stmt := range statements {
@@ -233,10 +265,10 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) migrateLegacySourceTables(ctx context.Context, source *model.Source) error {
-	if source == nil {
-		return nil
-	}
+// migrateLegacyColumns adds missing columns to tables that may already exist
+// from a previous version. This must run BEFORE ensureSource so that INSERT
+// statements referencing new columns succeed on older databases.
+func (s *Store) migrateLegacyColumns(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "sources", "`source_log_mode` VARCHAR(32) NOT NULL DEFAULT 'local_file' AFTER `source_db_version`"); err != nil {
 		return err
 	}
@@ -260,6 +292,24 @@ func (s *Store) migrateLegacySourceTables(ctx context.Context, source *model.Sou
 	}
 	if err := s.ensureColumn(ctx, "sources", "`source_local_spool_max_bytes` BIGINT NULL AFTER `source_initial_position`"); err != nil {
 		return err
+	}
+	if err := s.ensureColumn(ctx, "table_ingestion_checkpoints", "`last_thread_id` BIGINT NOT NULL DEFAULT 0 AFTER `last_start_time`"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "table_ingestion_checkpoints", "`last_server_id` BIGINT NOT NULL DEFAULT 0 AFTER `last_thread_id`"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "table_ingestion_checkpoints", "`last_row_identity_hash` CHAR(40) NOT NULL DEFAULT '' AFTER `last_server_id`"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateLegacySourceData runs data migrations and index rebuilds that require
+// the active source record to already exist.
+func (s *Store) migrateLegacySourceData(ctx context.Context, source *model.Source) error {
+	if source == nil {
+		return nil
 	}
 
 	if err := s.ensureColumn(ctx, "collector_checkpoints", "`source_id` BIGINT NULL AFTER `id`"); err != nil {
@@ -431,6 +481,10 @@ func (s *Store) GetSource(ctx context.Context) (*model.Source, error) {
 		return &source, nil
 	}
 	return nil, fmt.Errorf("active source is not configured")
+}
+
+func (s *Store) GetSourceID(ctx context.Context) (int64, error) {
+	return s.activeSourceID()
 }
 
 func (s *Store) GetAcquisitionStatus(ctx context.Context) (*model.AcquisitionStatus, error) {
@@ -769,6 +823,133 @@ func (s *Store) UpsertAcquisitionCheckpoint(ctx context.Context, checkpoint mode
 		checkpoint.LocalSpoolPath,
 		checkpoint.LastSpoolSizeBytes,
 		checkpoint.InitialPosition,
+		time.Now().UTC(),
+	)
+	return err
+}
+
+func (s *Store) GetDiscovery(ctx context.Context, sourceID int64) (*model.SourceDiscovery, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT source_id, discovery_state, slow_log_enabled, discovered_log_output, discovered_file_path,
+		       source_version, source_host, effective_acquisition_mode, diagnostic_message, discovered_at, updated_at
+		FROM source_discoveries
+		WHERE source_id = ?`,
+		sourceID,
+	)
+	var d model.SourceDiscovery
+	var slowLogEnabled sql.NullBool
+	var logOutput, filePath, version, host, effMode, diag sql.NullString
+	if err := row.Scan(
+		&d.SourceID, &d.DiscoveryState, &slowLogEnabled, &logOutput, &filePath,
+		&version, &host, &effMode, &diag, &d.DiscoveredAt, &d.UpdatedAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if slowLogEnabled.Valid {
+		v := slowLogEnabled.Bool
+		d.SlowLogEnabled = &v
+	}
+	if logOutput.Valid {
+		d.DiscoveredLogOutput = &logOutput.String
+	}
+	if filePath.Valid {
+		d.DiscoveredFilePath = &filePath.String
+	}
+	if version.Valid {
+		d.SourceVersion = &version.String
+	}
+	if host.Valid {
+		d.SourceHost = &host.String
+	}
+	if effMode.Valid {
+		d.EffectiveAcqMode = &effMode.String
+	}
+	if diag.Valid {
+		d.DiagnosticMessage = &diag.String
+	}
+	return &d, nil
+}
+
+func (s *Store) UpsertDiscovery(ctx context.Context, d model.SourceDiscovery) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO source_discoveries (
+			source_id, discovery_state, slow_log_enabled, discovered_log_output, discovered_file_path,
+			source_version, source_host, effective_acquisition_mode, diagnostic_message, discovered_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			discovery_state = VALUES(discovery_state),
+			slow_log_enabled = VALUES(slow_log_enabled),
+			discovered_log_output = VALUES(discovered_log_output),
+			discovered_file_path = VALUES(discovered_file_path),
+			source_version = VALUES(source_version),
+			source_host = VALUES(source_host),
+			effective_acquisition_mode = VALUES(effective_acquisition_mode),
+			diagnostic_message = VALUES(diagnostic_message),
+			discovered_at = VALUES(discovered_at),
+			updated_at = VALUES(updated_at)`,
+		d.SourceID,
+		d.DiscoveryState,
+		d.SlowLogEnabled,
+		d.DiscoveredLogOutput,
+		d.DiscoveredFilePath,
+		d.SourceVersion,
+		d.SourceHost,
+		d.EffectiveAcqMode,
+		d.DiagnosticMessage,
+		now,
+		now,
+	)
+	return err
+}
+
+func (s *Store) GetTableIngestionCheckpoint(ctx context.Context, sourceID int64) (*model.TableIngestionCheckpoint, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT source_id, last_start_time, last_thread_id, last_server_id, last_row_identity_hash, rows_ingested, updated_at
+		FROM table_ingestion_checkpoints
+		WHERE source_id = ?`,
+		sourceID,
+	)
+	var cp model.TableIngestionCheckpoint
+	if err := row.Scan(
+		&cp.SourceID,
+		&cp.LastStartTime,
+		&cp.LastThreadID,
+		&cp.LastServerID,
+		&cp.LastRowIdentityHash,
+		&cp.RowsIngested,
+		&cp.UpdatedAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &cp, nil
+}
+
+func (s *Store) UpsertTableIngestionCheckpoint(ctx context.Context, cp model.TableIngestionCheckpoint) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO table_ingestion_checkpoints (
+			source_id, last_start_time, last_thread_id, last_server_id, last_row_identity_hash, rows_ingested, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			last_start_time = VALUES(last_start_time),
+			last_thread_id = VALUES(last_thread_id),
+			last_server_id = VALUES(last_server_id),
+			last_row_identity_hash = VALUES(last_row_identity_hash),
+			rows_ingested = VALUES(rows_ingested),
+			updated_at = VALUES(updated_at)`,
+		cp.SourceID,
+		cp.LastStartTime,
+		cp.LastThreadID,
+		cp.LastServerID,
+		cp.LastRowIdentityHash,
+		cp.RowsIngested,
 		time.Now().UTC(),
 	)
 	return err

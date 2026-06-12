@@ -52,12 +52,23 @@ function acquisitionTone(status) {
   return toneFromStatus(status.acquisitionState, status.remoteAccessState);
 }
 
+function discoveryTone(discovery) {
+  if (!discovery) return "idle";
+  return toneFromStatus(discovery.discoveryState, null);
+}
+
 function sourceStateMessage(emptyMessage) {
   if (!sourceContext) {
     return emptyMessage;
   }
 
   const acquisition = sourceContext.acquisitionStatus;
+  const discovery = sourceContext.discoveryStatus;
+
+  if (discovery && ["error", "blocked"].includes(discovery.discoveryState)) {
+    return discovery.diagnosticMessage || "Source discovery failed.";
+  }
+
   if (acquisition && ["error", "blocked", "degraded"].includes(acquisition.acquisitionState)) {
     return acquisition.lastErrorMessage || "Remote acquisition is not healthy right now.";
   }
@@ -99,14 +110,49 @@ function renderFingerprintCard(item) {
   `;
 }
 
-function renderSourceContext(source, collectorStatus, acquisitionStatus) {
+function renderSourceContext(source, collectorStatus, acquisitionStatus, discoveryStatus) {
   const collectorToneValue = collectorTone(collectorStatus);
   const acquisitionToneValue = acquisitionTone(acquisitionStatus);
+  const discoveryToneValue = discoveryTone(discoveryStatus);
   const remoteEndpoint = [
     source.remoteUser ? `${source.remoteUser}@` : "",
     source.remoteHost || "",
     source.remotePort ? `:${source.remotePort}` : ""
   ].join("");
+
+  const isMySQLAuto = source.logMode === "mysql_auto";
+  const effectiveMode = discoveryStatus && discoveryStatus.effectiveAcquisitionMode
+    ? discoveryStatus.effectiveAcquisitionMode
+    : (acquisitionStatus.transportMode || source.logMode || "local_file");
+  const needsSSH = effectiveMode === "mysql_file" || effectiveMode === "ssh_pull";
+  const isTableMode = effectiveMode === "mysql_table";
+
+  let discoverySection = "";
+  if (isMySQLAuto && discoveryStatus) {
+    discoverySection = `
+      <section class="status-group">
+        <h3>Discovery</h3>
+        <div class="meta">
+          <span>State: ${escapeHTML(discoveryStatus.discoveryState || "unknown")}</span>
+          <span>Slow log enabled: ${discoveryStatus.slowLogEnabled === null || discoveryStatus.slowLogEnabled === undefined ? "n/a" : discoveryStatus.slowLogEnabled ? "yes" : "no"}</span>
+          <span>Log output: ${escapeHTML(discoveryStatus.discoveredLogOutput || "n/a")}</span>
+          <span>Discovered file path: ${escapeHTML(discoveryStatus.discoveredFilePath || "n/a")}</span>
+          <span>Effective mode: ${escapeHTML(effectiveMode)}</span>
+          <span>Source version: ${escapeHTML(discoveryStatus.sourceVersion || "n/a")}</span>
+          <span>Source host: ${escapeHTML(discoveryStatus.sourceHost || "n/a")}</span>
+        </div>
+      </section>
+    `;
+  }
+
+  let transportHint = "";
+  if (isTableMode) {
+    transportHint = `<span>Transport: direct from mysql.slow_log (no SSH required)</span>`;
+  } else if (needsSSH) {
+    transportHint = `<span>Transport: SSH-based file acquisition${isMySQLAuto ? " (discovered path)" : ""}</span>`;
+  } else {
+    transportHint = `<span>Transport: ${escapeHTML(acquisitionStatus.transportMode || source.logMode || "local_file")}</span>`;
+  }
 
   return `
     <div class="card status-card tone-${collectorToneValue}">
@@ -116,6 +162,7 @@ function renderSourceContext(source, collectorStatus, acquisitionStatus) {
           <h2>${escapeHTML(source.instanceName)}</h2>
         </div>
         <div class="status-stack">
+          ${isMySQLAuto ? `<span class="status-pill tone-${discoveryToneValue}">discovery: ${escapeHTML(discoveryStatus ? discoveryStatus.discoveryState || "unknown" : "unknown")}</span>` : ""}
           <span class="status-pill tone-${acquisitionToneValue}">acquisition: ${escapeHTML(acquisitionStatus.acquisitionState || "idle")}</span>
           <span class="status-pill tone-${collectorToneValue}">parser: ${escapeHTML(collectorStatus.collectorState || "idle")}</span>
         </div>
@@ -133,13 +180,15 @@ function renderSourceContext(source, collectorStatus, acquisitionStatus) {
           </div>
         </section>
 
+        ${discoverySection}
+
         <section class="status-group">
           <h3>Acquisition</h3>
           <div class="meta">
-            <span>Transport: ${escapeHTML(acquisitionStatus.transportMode || source.logMode || "local_file")}</span>
+            ${transportHint}
             <span>Remote access: ${escapeHTML(acquisitionStatus.remoteAccessState || "unknown")}</span>
             <span>Remote endpoint: ${escapeHTML(remoteEndpoint || "n/a")}</span>
-            <span>Remote path: ${escapeHTML(source.remoteSlowLogPath || "n/a")}</span>
+            <span>Remote path: ${escapeHTML(source.remoteSlowLogPath || (discoveryStatus && discoveryStatus.discoveredFilePath) || "n/a")}</span>
             <span>Local spool: ${escapeHTML(source.localSpoolPath || "n/a")}</span>
             <span>Spool size: ${formatBytes(acquisitionStatus.lastSpoolSizeBytes)}</span>
             <span>Spool ceiling: ${formatBytes(source.localSpoolMaxBytes)}</span>
@@ -159,6 +208,7 @@ function renderSourceContext(source, collectorStatus, acquisitionStatus) {
         </section>
       </div>
 
+      ${isMySQLAuto && discoveryStatus && discoveryStatus.diagnosticMessage ? renderStatusMessage("Discovery", discoveryStatus.diagnosticMessage) : ""}
       ${renderStatusMessage("Acquisition", acquisitionStatus.lastErrorMessage)}
       ${renderStatusMessage("Parser", collectorStatus.lastErrorMessage)}
     </div>
@@ -170,13 +220,14 @@ async function loadSourceContext() {
   if (!target) return null;
 
   try {
-    const [source, collectorStatus, acquisitionStatus] = await Promise.all([
+    const [source, collectorStatus, acquisitionStatus, discoveryStatus] = await Promise.all([
       fetchJSON("/api/source"),
       fetchJSON("/api/collector/status"),
-      fetchJSON("/api/acquisition/status")
+      fetchJSON("/api/acquisition/status"),
+      fetchJSON("/api/discovery/status")
     ]);
-    sourceContext = { source, collectorStatus, acquisitionStatus };
-    target.innerHTML = renderSourceContext(source, collectorStatus, acquisitionStatus);
+    sourceContext = { source, collectorStatus, acquisitionStatus, discoveryStatus };
+    target.innerHTML = renderSourceContext(source, collectorStatus, acquisitionStatus, discoveryStatus);
     return sourceContext;
   } catch (error) {
     target.className = "card status-card tone-error";

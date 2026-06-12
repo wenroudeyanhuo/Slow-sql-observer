@@ -43,6 +43,14 @@ func (stubQueryService) GetAcquisitionStatus(context.Context) (*model.Acquisitio
 	return &model.AcquisitionStatus{SourceID: 1, AcquisitionState: model.AcquisitionStateHealthy, RemoteAccessState: model.SourceAccessAccessible, TransportMode: model.LogModeLocalFile}, nil
 }
 
+func (stubQueryService) GetDiscovery(_ context.Context, _ int64) (*model.SourceDiscovery, error) {
+	return nil, nil
+}
+
+func (stubQueryService) GetSourceID(context.Context) (int64, error) {
+	return 1, nil
+}
+
 func TestOverviewEndpoint(t *testing.T) {
 	server := NewServer(stubQueryService{}, "../../web")
 	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/overview", nil)

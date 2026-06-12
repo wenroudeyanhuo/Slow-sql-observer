@@ -14,9 +14,11 @@ import (
 	"slow-sql-observer/internal/acquisition"
 	"slow-sql-observer/internal/collector"
 	"slow-sql-observer/internal/config"
+	"slow-sql-observer/internal/discovery"
 	"slow-sql-observer/internal/fingerprint"
 	"slow-sql-observer/internal/model"
 	"slow-sql-observer/internal/parser"
+	"slow-sql-observer/internal/tableingest"
 )
 
 type IngestStore interface {
@@ -30,23 +32,38 @@ type IngestStore interface {
 	UpsertCheckpoint(ctx context.Context, checkpoint model.CollectorCheckpoint) error
 	UpsertAcquisitionCheckpoint(ctx context.Context, checkpoint model.AcquisitionCheckpoint) error
 	CleanupExpiredRecords(ctx context.Context, sourceID int64, olderThan time.Time) (int64, error)
+	GetDiscovery(ctx context.Context, sourceID int64) (*model.SourceDiscovery, error)
+	UpsertDiscovery(ctx context.Context, d model.SourceDiscovery) error
+	GetTableIngestionCheckpoint(ctx context.Context, sourceID int64) (*model.TableIngestionCheckpoint, error)
+	UpsertTableIngestionCheckpoint(ctx context.Context, cp model.TableIngestionCheckpoint) error
 }
 
 type SourceProbe func(ctx context.Context, dsn string) (model.SourceMetadataUpdate, error)
 
 type AcquisitionService interface {
 	Acquire(ctx context.Context, source config.SourceConfig, checkpoint *model.AcquisitionCheckpoint) (model.AcquisitionResult, error)
+	AcquireMySQLFile(ctx context.Context, source config.SourceConfig, discoveredFilePath string, checkpoint *model.AcquisitionCheckpoint) (model.AcquisitionResult, error)
+}
+
+type DiscoveryService interface {
+	Discover(ctx context.Context, dsn string) (model.SourceDiscovery, error)
+}
+
+type TableIngester interface {
+	FetchAndMap(ctx context.Context, dsn string, checkpoint *model.TableIngestionCheckpoint, sourceID int64, instanceName string) ([]model.IngestRecordInput, model.TableIngestionCheckpoint, error)
 }
 
 type CollectorService struct {
-	source     config.SourceConfig
-	runtime    config.RuntimeConfig
-	store      IngestStore
-	parser     *parser.Parser
-	normalizer *fingerprint.Normalizer
-	framer     *collector.Framer
-	probe      SourceProbe
-	acquire    AcquisitionService
+	source        config.SourceConfig
+	runtime       config.RuntimeConfig
+	store         IngestStore
+	parser        *parser.Parser
+	normalizer    *fingerprint.Normalizer
+	framer        *collector.Framer
+	probe         SourceProbe
+	acquire       AcquisitionService
+	discover      DiscoveryService
+	tableIngester TableIngester
 }
 
 func NewCollectorService(source config.SourceConfig, runtime config.RuntimeConfig, store IngestStore) *CollectorService {
@@ -57,18 +74,24 @@ func NewCollectorService(source config.SourceConfig, runtime config.RuntimeConfi
 		source.InitialPosition = model.InitialPositionEnd
 	}
 	return &CollectorService{
-		source:     source,
-		runtime:    runtime,
-		store:      store,
-		parser:     parser.New(),
-		normalizer: fingerprint.NewNormalizer(),
-		framer:     collector.NewFramer(),
-		probe:      probeSourceDB,
-		acquire:    acquisition.NewService(nil),
+		source:        source,
+		runtime:       runtime,
+		store:         store,
+		parser:        parser.New(),
+		normalizer:    fingerprint.NewNormalizer(),
+		framer:        collector.NewFramer(),
+		probe:         probeSourceDB,
+		acquire:       acquisition.NewService(nil),
+		discover:      discovery.NewService(),
+		tableIngester: tableingest.New(),
 	}
 }
 
 func (s *CollectorService) CollectOnce(ctx context.Context) (model.CollectResult, error) {
+	if s.source.LogMode == model.LogModeMySQLAuto {
+		return s.collectOnceMySQLAuto(ctx)
+	}
+
 	source, err := s.store.GetSource(ctx)
 	if err != nil {
 		return model.CollectResult{}, err
@@ -129,7 +152,7 @@ func (s *CollectorService) CollectOnce(ctx context.Context) (model.CollectResult
 		processed := s.normalizer.Process(record.RawSQL)
 		record.SourceID = source.ID
 		record.SourceInstance = source.InstanceName
-		record.SourceLogFilePath = source.SlowLogPath
+		record.SourceLogFilePath = resolvedSourceLogPath(source, acquisitionResult, parsePath)
 		record.SourceFileID = state.Identity
 		record.SourceOffsetStart = block.StartOffset
 		record.SourceOffsetEnd = block.EndOffset
@@ -165,6 +188,300 @@ func (s *CollectorService) CollectOnce(ctx context.Context) (model.CollectResult
 		acquisitionResult.ShouldTruncate = true
 		acquisitionResult.SpoolSizeBytes = 0
 		if err := s.persistAcquisitionState(ctx, source, acquisitionResult, acquisitionErr); err != nil {
+			return result, err
+		}
+	}
+
+	retentionErr := s.runRetention(ctx, source.ID)
+	statusErr := combineStatusErrors(probeErr, retentionErr, truncateErr)
+	if statusErr != nil {
+		s.updateStatus(ctx, model.CollectorStatus{
+			SourceID:               source.ID,
+			CollectorState:         model.CollectorStateDegraded,
+			SourceAccessState:      normalizeAccessState(acquisitionResult.RemoteAccessState),
+			LastSuccessfulIngestAt: timePtr(time.Now().UTC()),
+			LastCheckpointOffset:   int64Ptr(lastOffset),
+			LastFileIdentity:       stringPtr(result.FileIdentity),
+			LastErrorAt:            timePtr(time.Now().UTC()),
+			LastErrorMessage:       stringPtr(statusErr.Error()),
+		})
+		return result, nil
+	}
+
+	if err := s.updateStatus(ctx, model.CollectorStatus{
+		SourceID:               source.ID,
+		CollectorState:         model.CollectorStateHealthy,
+		SourceAccessState:      normalizeAccessState(acquisitionResult.RemoteAccessState),
+		LastSuccessfulIngestAt: timePtr(time.Now().UTC()),
+		LastCheckpointOffset:   int64Ptr(lastOffset),
+		LastFileIdentity:       stringPtr(result.FileIdentity),
+	}); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (s *CollectorService) collectOnceMySQLAuto(ctx context.Context) (model.CollectResult, error) {
+	source, err := s.store.GetSource(ctx)
+	if err != nil {
+		return model.CollectResult{}, err
+	}
+
+	// Run source probe for metadata enrichment
+	probeErr := s.applySourceProbe(ctx, source)
+
+	// Run discovery
+	disc, _ := s.discover.Discover(ctx, s.source.DatabaseDSN)
+	disc.SourceID = source.ID
+
+	// Resolve effective acquisition mode
+	disc = discovery.Resolve(disc)
+
+	// Persist discovery
+	if err := s.store.UpsertDiscovery(ctx, disc); err != nil {
+		return model.CollectResult{}, fmt.Errorf("persist discovery: %w", err)
+	}
+
+	// Handle non-healthy discovery
+	if disc.DiscoveryState != model.DiscoveryStateHealthy {
+		errMsg := ""
+		if disc.DiagnosticMessage != nil {
+			errMsg = *disc.DiagnosticMessage
+		}
+		s.updateStatus(ctx, model.CollectorStatus{
+			SourceID:          source.ID,
+			CollectorState:    model.CollectorStateError,
+			SourceAccessState: model.SourceAccessInaccessible,
+			LastErrorAt:       timePtr(time.Now().UTC()),
+			LastErrorMessage:  stringPtr("discovery: " + errMsg),
+		})
+		_ = s.store.UpdateAcquisitionStatus(ctx, model.AcquisitionStatus{
+			SourceID:          source.ID,
+			AcquisitionState:  model.AcquisitionStateBlocked,
+			RemoteAccessState: model.SourceAccessUnknown,
+			TransportMode:     model.LogModeMySQLAuto,
+			LastErrorAt:       timePtr(time.Now().UTC()),
+			LastErrorMessage:  stringPtr("discovery blocked: " + errMsg),
+		})
+		return model.CollectResult{}, fmt.Errorf("discovery failed: %s", errMsg)
+	}
+
+	effectiveMode := ""
+	if disc.EffectiveAcqMode != nil {
+		effectiveMode = *disc.EffectiveAcqMode
+	}
+
+	switch effectiveMode {
+	case model.EffectiveModeMySQLFile:
+		return s.collectOnceMySQLFile(ctx, source, disc, probeErr)
+	case model.EffectiveModeMySQLTable:
+		return s.collectOnceMySQLTable(ctx, source, disc, probeErr)
+	default:
+		return model.CollectResult{}, fmt.Errorf("unknown effective acquisition mode: %s", effectiveMode)
+	}
+}
+
+func (s *CollectorService) collectOnceMySQLFile(ctx context.Context, source *model.Source, disc model.SourceDiscovery, probeErr error) (model.CollectResult, error) {
+	parserCheckpoint, err := s.store.GetCheckpoint(ctx, source.ID)
+	if err != nil {
+		s.updateErrorStatus(ctx, source.ID, model.SourceAccessAccessible, nil, "", err)
+		return model.CollectResult{}, err
+	}
+
+	acqCheckpoint, err := s.store.GetAcquisitionCheckpoint(ctx, source.ID)
+	if err != nil {
+		s.updateErrorStatus(ctx, source.ID, model.SourceAccessUnknown, parserCheckpoint, "", err)
+		return model.CollectResult{}, err
+	}
+
+	discoveredPath := ""
+	if disc.DiscoveredFilePath != nil {
+		discoveredPath = *disc.DiscoveredFilePath
+	}
+	// Allow override from config
+	if strings.TrimSpace(s.source.RemoteSlowLogPath) != "" {
+		discoveredPath = s.source.RemoteSlowLogPath
+	}
+
+	acqResult, acqErr := s.acquire.AcquireMySQLFile(ctx, s.source, discoveredPath, acqCheckpoint)
+	if err := s.persistAcquisitionState(ctx, source, acqResult, acqErr); err != nil {
+		return model.CollectResult{}, err
+	}
+	// Return early if acquisition is blocked or failed (blockedResult returns nil error)
+	if acqResult.AcquisitionState == model.AcquisitionStateBlocked || acqResult.AcquisitionState == model.AcquisitionStateError {
+		var errMsg string
+		switch {
+		case acqErr != nil:
+			errMsg = acqErr.Error()
+		case acqResult.AcquisitionError != nil:
+			errMsg = acqResult.AcquisitionError.Error()
+		default:
+			errMsg = "mysql_file acquisition blocked"
+		}
+		if !acqResult.ShouldParse {
+			return model.CollectResult{}, fmt.Errorf("mysql_file acquisition blocked: %s", errMsg)
+		}
+	}
+	if acqErr != nil && !acqResult.ShouldParse {
+		return model.CollectResult{}, acqErr
+	}
+
+	// Reuse the file-based parse flow
+	return s.parseFromFile(ctx, source, acqResult, parserCheckpoint, probeErr)
+}
+
+func (s *CollectorService) collectOnceMySQLTable(ctx context.Context, source *model.Source, disc model.SourceDiscovery, probeErr error) (model.CollectResult, error) {
+	tableCheckpoint, err := s.store.GetTableIngestionCheckpoint(ctx, source.ID)
+	if err != nil {
+		return model.CollectResult{}, fmt.Errorf("get table checkpoint: %w", err)
+	}
+
+	inputs, newCheckpoint, err := s.tableIngester.FetchAndMap(ctx, s.source.DatabaseDSN, tableCheckpoint, source.ID, source.InstanceName)
+	if err != nil {
+		s.updateStatus(ctx, model.CollectorStatus{
+			SourceID:          source.ID,
+			CollectorState:    model.CollectorStateError,
+			SourceAccessState: model.SourceAccessAccessible,
+			LastErrorAt:       timePtr(time.Now().UTC()),
+			LastErrorMessage:  stringPtr("table ingestion: " + err.Error()),
+		})
+		_ = s.store.UpdateAcquisitionStatus(ctx, model.AcquisitionStatus{
+			SourceID:          source.ID,
+			AcquisitionState:  model.AcquisitionStateError,
+			RemoteAccessState: model.SourceAccessAccessible,
+			TransportMode:     model.EffectiveModeMySQLTable,
+			LastErrorAt:       timePtr(time.Now().UTC()),
+			LastErrorMessage:  stringPtr(err.Error()),
+		})
+		return model.CollectResult{}, err
+	}
+
+	// Persist acquisition status for table mode
+	_ = s.store.UpdateAcquisitionStatus(ctx, model.AcquisitionStatus{
+		SourceID:             source.ID,
+		AcquisitionState:     model.AcquisitionStateHealthy,
+		RemoteAccessState:    model.SourceAccessAccessible,
+		TransportMode:        model.EffectiveModeMySQLTable,
+		LastSuccessfulPullAt: timePtr(time.Now().UTC()),
+	})
+
+	result := model.CollectResult{}
+	for _, input := range inputs {
+		processed := s.normalizer.Process(input.Record.RawSQL)
+		input.Record.NormalizedSQL = processed.NormalizedSQL
+		input.Record.FingerprintHash = processed.Hash
+		input.Record.CreatedAt = time.Now().UTC()
+		input.Fingerprint = processed
+
+		if err := s.store.IngestRecord(ctx, input); err != nil {
+			s.updateErrorStatus(ctx, source.ID, model.SourceAccessAccessible, nil, "table", fmt.Errorf("ingest table row: %w", err))
+			return result, err
+		}
+		result.EventsProcessed++
+	}
+
+	if newCheckpoint.RowsIngested > 0 {
+		if err := s.store.UpsertTableIngestionCheckpoint(ctx, newCheckpoint); err != nil {
+			return result, fmt.Errorf("save table checkpoint: %w", err)
+		}
+	}
+
+	retentionErr := s.runRetention(ctx, source.ID)
+	statusErr := combineStatusErrors(probeErr, retentionErr)
+	if statusErr != nil {
+		s.updateStatus(ctx, model.CollectorStatus{
+			SourceID:               source.ID,
+			CollectorState:         model.CollectorStateDegraded,
+			SourceAccessState:      model.SourceAccessAccessible,
+			LastSuccessfulIngestAt: timePtr(time.Now().UTC()),
+			LastErrorAt:            timePtr(time.Now().UTC()),
+			LastErrorMessage:       stringPtr(statusErr.Error()),
+		})
+		return result, nil
+	}
+
+	s.updateStatus(ctx, model.CollectorStatus{
+		SourceID:               source.ID,
+		CollectorState:         model.CollectorStateHealthy,
+		SourceAccessState:      model.SourceAccessAccessible,
+		LastSuccessfulIngestAt: timePtr(time.Now().UTC()),
+	})
+	return result, nil
+}
+
+// parseFromFile handles the file-based parse flow shared by local_file, ssh_pull, and mysql_file modes.
+func (s *CollectorService) parseFromFile(ctx context.Context, source *model.Source, acquisitionResult model.AcquisitionResult, parserCheckpoint *model.CollectorCheckpoint, probeErr error) (model.CollectResult, error) {
+	parsePath := acquisitionResult.ParsePath
+	if strings.TrimSpace(parsePath) == "" {
+		parsePath = s.source.EffectiveParsePath()
+	}
+	sourceLogPath := resolvedSourceLogPath(source, acquisitionResult, parsePath)
+
+	state, err := collector.StatFile(parsePath)
+	if err != nil {
+		s.updateErrorStatus(ctx, source.ID, normalizeAccessState(acquisitionResult.RemoteAccessState), parserCheckpoint, "", err)
+		return model.CollectResult{}, err
+	}
+
+	startOffset := collector.ResolveStartOffset(parserCheckpoint, state)
+	state, blocks, err := s.framer.ReadNewBlocks(ctx, parsePath, startOffset)
+	if err != nil {
+		s.updateErrorStatus(ctx, source.ID, normalizeAccessState(acquisitionResult.RemoteAccessState), parserCheckpoint, state.Identity, err)
+		return model.CollectResult{}, err
+	}
+
+	result := model.CollectResult{
+		FileIdentity: state.Identity,
+		StartOffset:  startOffset,
+		FinalOffset:  startOffset,
+	}
+
+	for _, block := range blocks {
+		record, err := s.parser.Parse(block.Raw)
+		if err != nil {
+			s.updateErrorStatus(ctx, source.ID, normalizeAccessState(acquisitionResult.RemoteAccessState), parserCheckpoint, state.Identity, fmt.Errorf("parse block at offset %d: %w", block.StartOffset, err))
+			return result, fmt.Errorf("parse block at offset %d: %w", block.StartOffset, err)
+		}
+
+		processed := s.normalizer.Process(record.RawSQL)
+		record.SourceID = source.ID
+		record.SourceInstance = source.InstanceName
+		record.SourceLogFilePath = sourceLogPath
+		record.SourceFileID = state.Identity
+		record.SourceOffsetStart = block.StartOffset
+		record.SourceOffsetEnd = block.EndOffset
+		record.NormalizedSQL = processed.NormalizedSQL
+		record.FingerprintHash = processed.Hash
+		record.CreatedAt = time.Now().UTC()
+
+		if err := s.store.IngestRecord(ctx, model.IngestRecordInput{
+			Record:      record,
+			Fingerprint: processed,
+		}); err != nil {
+			s.updateErrorStatus(ctx, source.ID, normalizeAccessState(acquisitionResult.RemoteAccessState), parserCheckpoint, state.Identity, fmt.Errorf("ingest block at offset %d: %w", block.StartOffset, err))
+			return result, fmt.Errorf("ingest block at offset %d: %w", block.StartOffset, err)
+		}
+
+		result.EventsProcessed++
+		result.FinalOffset = block.EndOffset
+	}
+
+	result.BytesRead = state.Size - startOffset
+	lastOffset := startOffset
+	if result.EventsProcessed > 0 {
+		lastOffset = result.FinalOffset
+	}
+
+	resetCheckpoint, truncated, truncateErr := s.maybeResetSpool(ctx, source, acquisitionResult, state, lastOffset)
+	if truncated {
+		lastOffset = 0
+		result.FinalOffset = 0
+		if resetCheckpoint != nil {
+			result.FileIdentity = resetCheckpoint.FileIdentity
+		}
+		acquisitionResult.ShouldTruncate = true
+		acquisitionResult.SpoolSizeBytes = 0
+		if err := s.persistAcquisitionState(ctx, source, acquisitionResult, nil); err != nil {
 			return result, err
 		}
 	}
@@ -299,15 +616,20 @@ func (s *CollectorService) persistAcquisitionState(ctx context.Context, source *
 		return fmt.Errorf("update acquisition status: %w", err)
 	}
 
-	if source.LogMode != model.LogModeSSHPull {
+	if source.LogMode != model.LogModeSSHPull && source.LogMode != model.LogModeMySQLAuto {
 		return nil
+	}
+
+	remotePath := nullableTrimmedPtr(result.SourceLogPath)
+	if remotePath == nil {
+		remotePath = nullableTrimmedPtr(source.SlowLogPath)
 	}
 
 	checkpoint := model.AcquisitionCheckpoint{
 		SourceID:           source.ID,
 		TransportMode:      status.TransportMode,
 		RemoteHost:         normalizeNullableString(source.RemoteHost),
-		RemotePath:         nullableTrimmedPtr(source.SlowLogPath),
+		RemotePath:         remotePath,
 		RemoteFileIdentity: nullableTrimmedPtr(result.RemoteFileIdentity),
 		LastRemoteOffset:   result.RemoteOffsetEnd,
 		LocalSpoolPath:     nullableTrimmedPtr(result.SpoolPath),
@@ -321,7 +643,7 @@ func (s *CollectorService) persistAcquisitionState(ctx context.Context, source *
 }
 
 func (s *CollectorService) maybeResetSpool(ctx context.Context, source *model.Source, acquisitionResult model.AcquisitionResult, state collector.FileState, lastOffset int64) (*model.CollectorCheckpoint, bool, error) {
-	if source.LogMode != model.LogModeSSHPull {
+	if source.LogMode != model.LogModeSSHPull && source.LogMode != model.LogModeMySQLAuto {
 		return nil, false, nil
 	}
 	if strings.TrimSpace(acquisitionResult.SpoolPath) == "" || state.Size == 0 {
@@ -443,4 +765,16 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func resolvedSourceLogPath(source *model.Source, result model.AcquisitionResult, parsePath string) string {
+	if trimmed := strings.TrimSpace(result.SourceLogPath); trimmed != "" {
+		return trimmed
+	}
+	if source != nil {
+		if trimmed := strings.TrimSpace(source.SlowLogPath); trimmed != "" {
+			return trimmed
+		}
+	}
+	return parsePath
 }

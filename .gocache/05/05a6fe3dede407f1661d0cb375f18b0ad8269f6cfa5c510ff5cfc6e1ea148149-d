@@ -1,0 +1,6 @@
+# test log
+getenv GOTMPDIR
+open C:\Users\Donson\AppData\Local\Temp\TestRootServesIndexWithoutRedirectLoop2440554585\001\index.html
+stat C:\Users\Donson\AppData\Local\Temp\TestRootServesIndexWithoutRedirectLoop2440554585\001\index.html
+open C:\Users\Donson\AppData\Local\Temp\TestRootServesIndexWithoutRedirectLoop2440554585\001\index.html
+open C:\Users\Donson\AppData\Local\Temp

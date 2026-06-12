@@ -23,6 +23,8 @@ type QueryService interface {
 	GetSource(ctx context.Context) (*model.Source, error)
 	GetCollectorStatus(ctx context.Context) (*model.CollectorStatus, error)
 	GetAcquisitionStatus(ctx context.Context) (*model.AcquisitionStatus, error)
+	GetDiscovery(ctx context.Context, sourceID int64) (*model.SourceDiscovery, error)
+	GetSourceID(ctx context.Context) (int64, error)
 }
 
 type Server struct {
@@ -40,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/source", s.handleSource)
 	mux.HandleFunc("/api/collector/status", s.handleCollectorStatus)
 	mux.HandleFunc("/api/acquisition/status", s.handleAcquisitionStatus)
+	mux.HandleFunc("/api/discovery/status", s.handleDiscoveryStatus)
 	mux.HandleFunc("/api/slow-sql/fingerprints/", s.handleFingerprintSubroutes)
 	mux.HandleFunc("/api/slow-sql/fingerprints", s.handleFingerprintList)
 	fileServer := http.FileServer(http.Dir(s.webDir))
@@ -96,6 +99,27 @@ func (s *Server) handleAcquisitionStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleDiscoveryStatus(w http.ResponseWriter, r *http.Request) {
+	sourceID, err := s.store.GetSourceID(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	disc, err := s.store.GetDiscovery(r.Context(), sourceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if disc == nil {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"discoveryState": "unknown",
+			"message":        "no discovery data available; source may not be in mysql_auto mode",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, disc)
 }
 
 func (s *Server) handleFingerprintList(w http.ResponseWriter, r *http.Request) {

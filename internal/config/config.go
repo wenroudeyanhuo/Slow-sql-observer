@@ -71,7 +71,7 @@ func Load() (Config, error) {
 			DatabaseDSN:        resolver.stringValue("SSO_SOURCE_DB_DSN", nil, ""),
 			Timezone:           resolver.stringValue("SSO_SOURCE_TIMEZONE", nil, ""),
 			Description:        resolver.stringValue("SSO_SOURCE_DESCRIPTION", nil, ""),
-			LogMode:            normalizeLogMode(resolver.stringValue("SSO_SOURCE_LOG_MODE", nil, model.LogModeLocalFile)),
+			LogMode:            normalizeLogMode(resolver.stringValue("SSO_SOURCE_MODE", []string{"SSO_SOURCE_LOG_MODE"}, model.LogModeLocalFile)),
 			RemoteHost:         resolver.stringValue("SSO_SOURCE_REMOTE_HOST", nil, ""),
 			RemotePort:         resolver.intValue("SSO_SOURCE_REMOTE_PORT", nil, 22),
 			RemoteUser:         resolver.stringValue("SSO_SOURCE_REMOTE_USER", nil, ""),
@@ -240,6 +240,8 @@ func normalizeLogMode(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case model.LogModeSSHPull:
 		return model.LogModeSSHPull
+	case model.LogModeMySQLAuto:
+		return model.LogModeMySQLAuto
 	default:
 		return model.LogModeLocalFile
 	}
@@ -285,21 +287,36 @@ func (s SourceConfig) Validate() error {
 		if s.LocalSpoolMaxBytes <= 0 {
 			return fmt.Errorf("SSO_SOURCE_LOCAL_SPOOL_MAX_BYTES must be positive in ssh_pull mode")
 		}
+	case model.LogModeMySQLAuto:
+		if strings.TrimSpace(s.DatabaseDSN) == "" {
+			return fmt.Errorf("SSO_SOURCE_DB_DSN must not be empty in mysql_auto mode")
+		}
 	default:
-		return fmt.Errorf("unsupported SSO_SOURCE_LOG_MODE: %s", s.LogMode)
+		return fmt.Errorf("unsupported SSO_SOURCE_MODE: %s", s.LogMode)
 	}
 	return nil
 }
 
 func (s SourceConfig) IdentityPath() string {
-	if s.LogMode == model.LogModeSSHPull && strings.TrimSpace(s.RemoteSlowLogPath) != "" {
-		return s.RemoteSlowLogPath
+	switch s.LogMode {
+	case model.LogModeSSHPull:
+		if strings.TrimSpace(s.RemoteSlowLogPath) != "" {
+			return s.RemoteSlowLogPath
+		}
+	case model.LogModeMySQLAuto:
+		if strings.TrimSpace(s.RemoteSlowLogPath) != "" {
+			return s.RemoteSlowLogPath
+		}
+		return "mysql-auto://" + s.InstanceName
 	}
 	return s.SlowLogPath
 }
 
 func (s SourceConfig) EffectiveParsePath() string {
-	if s.LogMode == model.LogModeSSHPull {
+	switch s.LogMode {
+	case model.LogModeSSHPull:
+		return filepath.Join(s.LocalSpoolDir, model.SourceKey(s.InstanceName, s.IdentityPath())+".slow.log")
+	case model.LogModeMySQLAuto:
 		return filepath.Join(s.LocalSpoolDir, model.SourceKey(s.InstanceName, s.IdentityPath())+".slow.log")
 	}
 	return s.SlowLogPath
