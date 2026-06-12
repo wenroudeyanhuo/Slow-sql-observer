@@ -192,49 +192,63 @@ type CollectorCheckpoint struct {
 }
 
 type FingerprintRecordView struct {
+	ActiveMinQueryTimeSec float64 `json:"activeMinQueryTimeSec"`
 	Fingerprint
 	FingerprintStats
 }
 
 type Overview struct {
-	TotalRecords      int64                   `json:"totalRecords"`
-	TotalFingerprints int64                   `json:"totalFingerprints"`
-	TotalQueryTimeSec float64                 `json:"totalQueryTimeSec"`
-	AvgQueryTimeSec   float64                 `json:"avgQueryTimeSec"`
-	MaxQueryTimeSec   float64                 `json:"maxQueryTimeSec"`
-	LastIngestedAt    *time.Time              `json:"lastIngestedAt"`
-	TopFingerprints   []FingerprintRecordView `json:"topFingerprints"`
+	ActiveMinQueryTimeSec float64                 `json:"activeMinQueryTimeSec"`
+	TotalRecords          int64                   `json:"totalRecords"`
+	TotalFingerprints     int64                   `json:"totalFingerprints"`
+	TotalQueryTimeSec     float64                 `json:"totalQueryTimeSec"`
+	AvgQueryTimeSec       float64                 `json:"avgQueryTimeSec"`
+	MaxQueryTimeSec       float64                 `json:"maxQueryTimeSec"`
+	LastIngestedAt        *time.Time              `json:"lastIngestedAt"`
+	TopFingerprints       []FingerprintRecordView `json:"topFingerprints"`
+}
+
+type OverviewParams struct {
+	MinQueryTimeSec float64
 }
 
 type ListFingerprintsParams struct {
-	Page      int
-	PageSize  int
-	SortBy    string
-	SortOrder string
-	DBName    string
-	SQLType   string
-	Keyword   string
+	Page            int
+	PageSize        int
+	SortBy          string
+	SortOrder       string
+	DBName          string
+	SQLType         string
+	Keyword         string
+	MinQueryTimeSec float64
+}
+
+type GetFingerprintParams struct {
+	MinQueryTimeSec float64
 }
 
 type ListFingerprintRecordsParams struct {
-	Page      int
-	PageSize  int
-	SortBy    string
-	SortOrder string
+	Page            int
+	PageSize        int
+	SortBy          string
+	SortOrder       string
+	MinQueryTimeSec float64
 }
 
 type PaginatedFingerprints struct {
-	Items    []FingerprintRecordView `json:"items"`
-	Total    int64                   `json:"total"`
-	Page     int                     `json:"page"`
-	PageSize int                     `json:"pageSize"`
+	ActiveMinQueryTimeSec float64                 `json:"activeMinQueryTimeSec"`
+	Items                 []FingerprintRecordView `json:"items"`
+	Total                 int64                   `json:"total"`
+	Page                  int                     `json:"page"`
+	PageSize              int                     `json:"pageSize"`
 }
 
 type PaginatedRecords struct {
-	Items    []SlowQueryRecord `json:"items"`
-	Total    int64             `json:"total"`
-	Page     int               `json:"page"`
-	PageSize int               `json:"pageSize"`
+	ActiveMinQueryTimeSec float64           `json:"activeMinQueryTimeSec"`
+	Items                 []SlowQueryRecord `json:"items"`
+	Total                 int64             `json:"total"`
+	Page                  int               `json:"page"`
+	PageSize              int               `json:"pageSize"`
 }
 
 type ProcessedFingerprint struct {

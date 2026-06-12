@@ -122,3 +122,38 @@ func TestLoadRejectsIncompleteSSHPullConfiguration(t *testing.T) {
 		t.Fatalf("expected ssh_pull validation error")
 	}
 }
+
+func TestLoadAnalysisThresholdDefaultAndOverride(t *testing.T) {
+	t.Setenv("SSO_SOURCE_INSTANCE_NAME", "local-mysql")
+	t.Setenv("SSO_SOURCE_MODE", "local_file")
+	t.Setenv("SSO_SOURCE_SLOW_LOG_PATH", "/tmp/slow.log")
+	t.Setenv("SSO_ANALYSIS_DB_DSN", "root:root@tcp(127.0.0.1:3306)/")
+	t.Setenv("SSO_ANALYSIS_DB_SCHEMA", "slow_sql_observer")
+	t.Setenv("SSO_ANALYSIS_MIN_QUERY_TIME_SEC", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Runtime.AnalysisMinQueryTimeSec != 1.0 {
+		t.Fatalf("expected default analysis threshold 1.0, got %v", cfg.Runtime.AnalysisMinQueryTimeSec)
+	}
+
+	t.Setenv("SSO_ANALYSIS_MIN_QUERY_TIME_SEC", "0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load returned error for disabled threshold: %v", err)
+	}
+	if cfg.Runtime.AnalysisMinQueryTimeSec != 0 {
+		t.Fatalf("expected disabled analysis threshold 0, got %v", cfg.Runtime.AnalysisMinQueryTimeSec)
+	}
+
+	t.Setenv("SSO_ANALYSIS_MIN_QUERY_TIME_SEC", "2.5")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load returned error for explicit threshold: %v", err)
+	}
+	if cfg.Runtime.AnalysisMinQueryTimeSec != 2.5 {
+		t.Fatalf("expected explicit analysis threshold 2.5, got %v", cfg.Runtime.AnalysisMinQueryTimeSec)
+	}
+}

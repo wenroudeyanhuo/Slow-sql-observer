@@ -26,7 +26,7 @@ func main() {
 	}
 	defer store.Close()
 
-	server := api.NewServer(store, cfg.Server.WebDir)
+	server := api.NewServer(store, cfg.Server.WebDir, cfg.Runtime.AnalysisMinQueryTimeSec)
 	log.Printf("server listening on %s", cfg.Server.Addr)
 	if err := http.ListenAndServe(cfg.Server.Addr, server.Handler()); err != nil {
 		log.Fatalf("listen and serve: %v", err)

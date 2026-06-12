@@ -16,9 +16,9 @@ import (
 )
 
 type QueryService interface {
-	GetOverview(ctx context.Context) (model.Overview, error)
+	GetOverview(ctx context.Context, params model.OverviewParams) (model.Overview, error)
 	ListFingerprints(ctx context.Context, params model.ListFingerprintsParams) (model.PaginatedFingerprints, error)
-	GetFingerprint(ctx context.Context, id int64) (*model.FingerprintRecordView, error)
+	GetFingerprint(ctx context.Context, id int64, params model.GetFingerprintParams) (*model.FingerprintRecordView, error)
 	ListFingerprintRecords(ctx context.Context, fingerprintID int64, params model.ListFingerprintRecordsParams) (model.PaginatedRecords, error)
 	GetSource(ctx context.Context) (*model.Source, error)
 	GetCollectorStatus(ctx context.Context) (*model.CollectorStatus, error)
@@ -28,12 +28,17 @@ type QueryService interface {
 }
 
 type Server struct {
-	store  QueryService
-	webDir string
+	store                  QueryService
+	webDir                 string
+	defaultMinQueryTimeSec float64
 }
 
-func NewServer(store QueryService, webDir string) *Server {
-	return &Server{store: store, webDir: webDir}
+func NewServer(store QueryService, webDir string, defaultMinQueryTimeSec float64) *Server {
+	return &Server{
+		store:                  store,
+		webDir:                 webDir,
+		defaultMinQueryTimeSec: normalizeMinQueryTimeSec(defaultMinQueryTimeSec),
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -66,7 +71,9 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
-	overview, err := s.store.GetOverview(r.Context())
+	overview, err := s.store.GetOverview(r.Context(), model.OverviewParams{
+		MinQueryTimeSec: s.resolveMinQueryTimeSec(r),
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -124,13 +131,14 @@ func (s *Server) handleDiscoveryStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFingerprintList(w http.ResponseWriter, r *http.Request) {
 	params := model.ListFingerprintsParams{
-		Page:      parseInt(r.URL.Query().Get("page"), 1),
-		PageSize:  parseInt(r.URL.Query().Get("pageSize"), 20),
-		SortBy:    r.URL.Query().Get("sortBy"),
-		SortOrder: r.URL.Query().Get("sortOrder"),
-		DBName:    r.URL.Query().Get("dbName"),
-		SQLType:   r.URL.Query().Get("sqlType"),
-		Keyword:   r.URL.Query().Get("keyword"),
+		Page:            parseInt(r.URL.Query().Get("page"), 1),
+		PageSize:        parseInt(r.URL.Query().Get("pageSize"), 20),
+		SortBy:          r.URL.Query().Get("sortBy"),
+		SortOrder:       r.URL.Query().Get("sortOrder"),
+		DBName:          r.URL.Query().Get("dbName"),
+		SQLType:         r.URL.Query().Get("sqlType"),
+		Keyword:         r.URL.Query().Get("keyword"),
+		MinQueryTimeSec: s.resolveMinQueryTimeSec(r),
 	}
 	response, err := s.store.ListFingerprints(r.Context(), params)
 	if err != nil {
@@ -161,7 +169,9 @@ func (s *Server) handleFingerprintSubroutes(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleFingerprintDetail(w http.ResponseWriter, r *http.Request, id int64) {
-	view, err := s.store.GetFingerprint(r.Context(), id)
+	view, err := s.store.GetFingerprint(r.Context(), id, model.GetFingerprintParams{
+		MinQueryTimeSec: s.resolveMinQueryTimeSec(r),
+	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, err)
@@ -175,10 +185,11 @@ func (s *Server) handleFingerprintDetail(w http.ResponseWriter, r *http.Request,
 
 func (s *Server) handleFingerprintRecords(w http.ResponseWriter, r *http.Request, id int64) {
 	params := model.ListFingerprintRecordsParams{
-		Page:      parseInt(r.URL.Query().Get("page"), 1),
-		PageSize:  parseInt(r.URL.Query().Get("pageSize"), 20),
-		SortBy:    r.URL.Query().Get("sortBy"),
-		SortOrder: r.URL.Query().Get("sortOrder"),
+		Page:            parseInt(r.URL.Query().Get("page"), 1),
+		PageSize:        parseInt(r.URL.Query().Get("pageSize"), 20),
+		SortBy:          r.URL.Query().Get("sortBy"),
+		SortOrder:       r.URL.Query().Get("sortOrder"),
+		MinQueryTimeSec: s.resolveMinQueryTimeSec(r),
 	}
 	response, err := s.store.ListFingerprintRecords(r.Context(), id, params)
 	if err != nil {
@@ -209,4 +220,23 @@ func parseInt(value string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func (s *Server) resolveMinQueryTimeSec(r *http.Request) float64 {
+	raw := strings.TrimSpace(r.URL.Query().Get("minQueryTimeSec"))
+	if raw == "" {
+		return s.defaultMinQueryTimeSec
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return s.defaultMinQueryTimeSec
+	}
+	return normalizeMinQueryTimeSec(value)
+}
+
+func normalizeMinQueryTimeSec(value float64) float64 {
+	if value <= 0 {
+		return 0
+	}
+	return value
 }

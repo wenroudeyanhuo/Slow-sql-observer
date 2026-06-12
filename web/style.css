@@ -100,6 +100,14 @@ h1, h2, h3, p {
   gap: 1rem;
 }
 
+.section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 .status-card {
   display: grid;
   gap: 1rem;
@@ -237,6 +245,12 @@ h1, h2, h3, p {
   margin-bottom: 1rem;
 }
 
+.inline-filters {
+  margin-bottom: 0;
+  min-width: min(100%, 320px);
+  grid-template-columns: minmax(180px, 1fr) auto;
+}
+
 input,
 select,
 button {
@@ -265,5 +279,16 @@ button {
   .shell-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .section-head,
+  .section-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .inline-filters {
+    min-width: 100%;
+    grid-template-columns: 1fr;
   }
 }

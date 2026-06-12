@@ -87,4 +87,5 @@ flowchart LR
 - The current release is single-source by design.
 - The collector watches one MySQL instance, not one individual business schema.
 - A new business database created on the same observed MySQL instance is included automatically as long as its slow SQL enters the slow-log source.
+- The analysis threshold filters overview and ranking output only; it does not change what the collector ingests from MySQL.
 - Hosted MySQL with `log_output=FILE` but without SSH or a provider log API is outside the supported scope of this release.

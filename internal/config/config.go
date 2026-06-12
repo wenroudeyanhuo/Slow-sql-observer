@@ -49,9 +49,10 @@ type AnalysisConfig struct {
 }
 
 type RuntimeConfig struct {
-	CollectorPollInterval  time.Duration
-	RawRecordRetentionDays int
-	LogLevel               string
+	CollectorPollInterval   time.Duration
+	RawRecordRetentionDays  int
+	AnalysisMinQueryTimeSec float64
+	LogLevel                string
 }
 
 func Load() (Config, error) {
@@ -87,9 +88,10 @@ func Load() (Config, error) {
 			Schema: resolver.stringValue("SSO_ANALYSIS_DB_SCHEMA", []string{"SSO_DB_SCHEMA"}, "slow_sql_observer"),
 		},
 		Runtime: RuntimeConfig{
-			CollectorPollInterval:  resolver.durationValue("SSO_COLLECTOR_POLL_INTERVAL", nil, 15*time.Second),
-			RawRecordRetentionDays: resolver.intValue("SSO_RAW_RECORD_RETENTION_DAYS", nil, 0),
-			LogLevel:               resolver.stringValue("SSO_LOG_LEVEL", nil, "info"),
+			CollectorPollInterval:   resolver.durationValue("SSO_COLLECTOR_POLL_INTERVAL", nil, 15*time.Second),
+			RawRecordRetentionDays:  resolver.intValue("SSO_RAW_RECORD_RETENTION_DAYS", nil, 0),
+			AnalysisMinQueryTimeSec: resolver.float64Value("SSO_ANALYSIS_MIN_QUERY_TIME_SEC", nil, 1.0),
+			LogLevel:                resolver.stringValue("SSO_LOG_LEVEL", nil, "info"),
 		},
 		Warnings: resolver.warnings,
 	}
@@ -168,6 +170,18 @@ func (r *envResolver) int64Value(preferred string, legacy []string, fallback int
 		return fallback
 	}
 	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func (r *envResolver) float64Value(preferred string, legacy []string, fallback float64) float64 {
+	raw := r.stringValue(preferred, legacy, "")
+	if strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return fallback
 	}

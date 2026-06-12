@@ -1004,50 +1004,49 @@ func (s *Store) CleanupExpiredRecords(ctx context.Context, sourceID int64, older
 	return result.RowsAffected()
 }
 
-func (s *Store) GetOverview(ctx context.Context) (model.Overview, error) {
+func (s *Store) GetOverview(ctx context.Context, params model.OverviewParams) (model.Overview, error) {
 	sourceID, err := s.activeSourceID()
 	if err != nil {
 		return model.Overview{}, err
 	}
 
-	overview := model.Overview{}
-	var totalCount int64
+	minQueryTimeSec := normalizeMinQueryTimeSec(params.MinQueryTimeSec)
+	overview := model.Overview{ActiveMinQueryTimeSec: minQueryTimeSec}
 	var lastSeen sql.NullTime
-	if err := s.db.QueryRowContext(ctx, `
+	args := []any{sourceID}
+	query := `
 		SELECT
-			COALESCE((SELECT COUNT(*) FROM slow_query_records WHERE source_id = ?), 0),
-			COALESCE((SELECT COUNT(*) FROM fingerprints WHERE source_id = ?), 0),
-			COALESCE(SUM(fs.total_query_time_sec), 0),
-			COALESCE(SUM(fs.total_count), 0),
-			COALESCE(MAX(fs.max_query_time_sec), 0),
-			MAX(fs.last_seen_at)
-		FROM fingerprint_stats fs
-		JOIN fingerprints f ON f.id = fs.fingerprint_id
-		WHERE f.source_id = ?`,
-		sourceID,
-		sourceID,
-		sourceID,
-	).Scan(
+			COUNT(*),
+			COUNT(DISTINCT fingerprint_id),
+			COALESCE(SUM(query_time_sec), 0),
+			COALESCE(AVG(query_time_sec), 0),
+			COALESCE(MAX(query_time_sec), 0),
+			MAX(occurred_at)
+		FROM slow_query_records
+		WHERE source_id = ?`
+	if minQueryTimeSec > 0 {
+		query += ` AND query_time_sec >= ?`
+		args = append(args, minQueryTimeSec)
+	}
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(
 		&overview.TotalRecords,
 		&overview.TotalFingerprints,
 		&overview.TotalQueryTimeSec,
-		&totalCount,
+		&overview.AvgQueryTimeSec,
 		&overview.MaxQueryTimeSec,
 		&lastSeen,
 	); err != nil {
 		return overview, err
 	}
-	if totalCount > 0 {
-		overview.AvgQueryTimeSec = overview.TotalQueryTimeSec / float64(totalCount)
-	}
 	if lastSeen.Valid {
 		overview.LastIngestedAt = &lastSeen.Time
 	}
 	items, err := s.ListFingerprints(ctx, model.ListFingerprintsParams{
-		Page:      1,
-		PageSize:  5,
-		SortBy:    "totalQueryTimeSec",
-		SortOrder: "desc",
+		Page:            1,
+		PageSize:        5,
+		SortBy:          "totalQueryTimeSec",
+		SortOrder:       "desc",
+		MinQueryTimeSec: minQueryTimeSec,
 	})
 	if err != nil {
 		return overview, err
@@ -1066,6 +1065,7 @@ func (s *Store) ListFingerprints(ctx context.Context, params model.ListFingerpri
 	pageSize := normalizePageSize(params.PageSize)
 	sortBy := normalizeFingerprintSort(params.SortBy)
 	sortOrder := normalizeSortOrder(params.SortOrder)
+	minQueryTimeSec := normalizeMinQueryTimeSec(params.MinQueryTimeSec)
 
 	clauses := []string{"f.source_id = ?"}
 	args := []any{sourceID}
@@ -1077,40 +1077,36 @@ func (s *Store) ListFingerprints(ctx context.Context, params model.ListFingerpri
 		clauses = append(clauses, "f.normalized_sql LIKE ?")
 		args = append(args, "%"+params.Keyword+"%")
 	}
-	if params.DBName != "" {
-		clauses = append(clauses, `EXISTS (
-			SELECT 1 FROM slow_query_records r
-			WHERE r.source_id = f.source_id AND r.fingerprint_id = f.id AND r.db_name = ?
-		)`)
-		args = append(args, params.DBName)
-	}
 
 	where := strings.Join(clauses, " AND ")
+	aggQuery, aggArgs := buildFingerprintAggregationQuery(sourceID, params.DBName, minQueryTimeSec)
+
 	var total int64
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM fingerprints f
-		JOIN fingerprint_stats fs ON fs.fingerprint_id = f.id
-		WHERE `+where, args...).Scan(&total); err != nil {
+		JOIN (`+aggQuery+`) agg ON agg.fingerprint_id = f.id
+		WHERE `+where, append(aggArgs, args...)...).Scan(&total); err != nil {
 		return model.PaginatedFingerprints{}, err
 	}
 
 	query := `
 		SELECT
 			f.id, f.source_id, f.fingerprint_hash, f.normalized_sql, f.sql_type, f.main_table_name,
-			f.first_seen_at, f.last_seen_at, f.created_at, f.updated_at,
-			fs.total_count, fs.total_query_time_sec, fs.avg_query_time_sec, fs.max_query_time_sec,
-			fs.total_rows_examined, fs.avg_rows_examined, fs.max_rows_examined,
-			fs.total_rows_sent, fs.avg_rows_sent, fs.max_rows_sent,
-			fs.first_seen_at, fs.last_seen_at, fs.updated_at
+			agg.first_seen_at, agg.last_seen_at, f.created_at, f.updated_at,
+			agg.total_count, agg.total_query_time_sec, agg.avg_query_time_sec, agg.max_query_time_sec,
+			agg.total_rows_examined, agg.avg_rows_examined, agg.max_rows_examined,
+			agg.total_rows_sent, agg.avg_rows_sent, agg.max_rows_sent,
+			agg.first_seen_at, agg.last_seen_at, agg.updated_at
 		FROM fingerprints f
-		JOIN fingerprint_stats fs ON fs.fingerprint_id = f.id
+		JOIN (` + aggQuery + `) agg ON agg.fingerprint_id = f.id
 		WHERE ` + where + `
 		ORDER BY ` + sortBy + ` ` + sortOrder + `
 		LIMIT ? OFFSET ?`
 
-	args = append(args, pageSize, (page-1)*pageSize)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	queryArgs := append(append([]any{}, aggArgs...), args...)
+	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return model.PaginatedFingerprints{}, err
 	}
@@ -1122,28 +1118,37 @@ func (s *Store) ListFingerprints(ctx context.Context, params model.ListFingerpri
 		if err != nil {
 			return model.PaginatedFingerprints{}, err
 		}
+		view.ActiveMinQueryTimeSec = minQueryTimeSec
 		items = append(items, view)
 	}
-	return model.PaginatedFingerprints{Items: items, Total: total, Page: page, PageSize: pageSize}, rows.Err()
+	return model.PaginatedFingerprints{
+		ActiveMinQueryTimeSec: minQueryTimeSec,
+		Items:                 items,
+		Total:                 total,
+		Page:                  page,
+		PageSize:              pageSize,
+	}, rows.Err()
 }
 
-func (s *Store) GetFingerprint(ctx context.Context, id int64) (*model.FingerprintRecordView, error) {
+func (s *Store) GetFingerprint(ctx context.Context, id int64, params model.GetFingerprintParams) (*model.FingerprintRecordView, error) {
 	sourceID, err := s.activeSourceID()
 	if err != nil {
 		return nil, err
 	}
 
+	minQueryTimeSec := normalizeMinQueryTimeSec(params.MinQueryTimeSec)
+	aggQuery, aggArgs := buildFingerprintAggregationQuery(sourceID, "", minQueryTimeSec)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			f.id, f.source_id, f.fingerprint_hash, f.normalized_sql, f.sql_type, f.main_table_name,
-			f.first_seen_at, f.last_seen_at, f.created_at, f.updated_at,
-			fs.total_count, fs.total_query_time_sec, fs.avg_query_time_sec, fs.max_query_time_sec,
-			fs.total_rows_examined, fs.avg_rows_examined, fs.max_rows_examined,
-			fs.total_rows_sent, fs.avg_rows_sent, fs.max_rows_sent,
-			fs.first_seen_at, fs.last_seen_at, fs.updated_at
+			agg.first_seen_at, agg.last_seen_at, f.created_at, f.updated_at,
+			agg.total_count, agg.total_query_time_sec, agg.avg_query_time_sec, agg.max_query_time_sec,
+			agg.total_rows_examined, agg.avg_rows_examined, agg.max_rows_examined,
+			agg.total_rows_sent, agg.avg_rows_sent, agg.max_rows_sent,
+			agg.first_seen_at, agg.last_seen_at, agg.updated_at
 		FROM fingerprints f
-		JOIN fingerprint_stats fs ON fs.fingerprint_id = f.id
-		WHERE f.source_id = ? AND f.id = ?`, sourceID, id)
+		JOIN (`+aggQuery+`) agg ON agg.fingerprint_id = f.id
+		WHERE f.source_id = ? AND f.id = ?`, append(aggArgs, sourceID, id)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1155,6 +1160,7 @@ func (s *Store) GetFingerprint(ctx context.Context, id int64) (*model.Fingerprin
 	if err != nil {
 		return nil, err
 	}
+	view.ActiveMinQueryTimeSec = minQueryTimeSec
 	return &view, nil
 }
 
@@ -1168,23 +1174,36 @@ func (s *Store) ListFingerprintRecords(ctx context.Context, fingerprintID int64,
 	pageSize := normalizePageSize(params.PageSize)
 	sortBy := normalizeRecordSort(params.SortBy)
 	sortOrder := normalizeSortOrder(params.SortOrder)
+	minQueryTimeSec := normalizeMinQueryTimeSec(params.MinQueryTimeSec)
 
+	countArgs := []any{sourceID, fingerprintID}
+	countQuery := `SELECT COUNT(*) FROM slow_query_records WHERE source_id = ? AND fingerprint_id = ?`
+	if minQueryTimeSec > 0 {
+		countQuery += ` AND query_time_sec >= ?`
+		countArgs = append(countArgs, minQueryTimeSec)
+	}
 	var total int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM slow_query_records WHERE source_id = ? AND fingerprint_id = ?`, sourceID, fingerprintID).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
 		return model.PaginatedRecords{}, err
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	queryArgs := []any{sourceID, fingerprintID}
+	query := `
 		SELECT
 			id, source_id, source_instance_name, source_log_file_path, source_file_identity, source_offset_start, source_offset_end,
 			occurred_at, db_name, user_name, client_host, raw_block, raw_sql, normalized_sql, fingerprint_id,
 			fingerprint_hash, query_time_sec, lock_time_sec, rows_sent, rows_examined, created_at
 		FROM slow_query_records
-		WHERE source_id = ? AND fingerprint_id = ?
-		ORDER BY `+sortBy+` `+sortOrder+`
-		LIMIT ? OFFSET ?`,
-		sourceID, fingerprintID, pageSize, (page-1)*pageSize,
-	)
+		WHERE source_id = ? AND fingerprint_id = ?`
+	if minQueryTimeSec > 0 {
+		query += ` AND query_time_sec >= ?`
+		queryArgs = append(queryArgs, minQueryTimeSec)
+	}
+	query += `
+		ORDER BY ` + sortBy + ` ` + sortOrder + `
+		LIMIT ? OFFSET ?`
+	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return model.PaginatedRecords{}, err
 	}
@@ -1198,7 +1217,13 @@ func (s *Store) ListFingerprintRecords(ctx context.Context, fingerprintID int64,
 		}
 		items = append(items, record)
 	}
-	return model.PaginatedRecords{Items: items, Total: total, Page: page, PageSize: pageSize}, rows.Err()
+	return model.PaginatedRecords{
+		ActiveMinQueryTimeSec: minQueryTimeSec,
+		Items:                 items,
+		Total:                 total,
+		Page:                  page,
+		PageSize:              pageSize,
+	}, rows.Err()
 }
 
 func (s *Store) ensureSource(ctx context.Context, cfg config.SourceConfig) (*model.Source, error) {
@@ -1584,17 +1609,17 @@ func normalizeSortOrder(order string) string {
 func normalizeFingerprintSort(sortBy string) string {
 	switch sortBy {
 	case "avgQueryTimeSec":
-		return "fs.avg_query_time_sec"
+		return "agg.avg_query_time_sec"
 	case "maxQueryTimeSec":
-		return "fs.max_query_time_sec"
+		return "agg.max_query_time_sec"
 	case "totalCount":
-		return "fs.total_count"
+		return "agg.total_count"
 	case "lastSeenAt":
-		return "fs.last_seen_at"
+		return "agg.last_seen_at"
 	case "avgRowsExamined":
-		return "fs.avg_rows_examined"
+		return "agg.avg_rows_examined"
 	default:
-		return "fs.total_query_time_sec"
+		return "agg.total_query_time_sec"
 	}
 }
 
@@ -1634,6 +1659,47 @@ func nullableInt64(value int64) *int64 {
 		return nil
 	}
 	return &value
+}
+
+func normalizeMinQueryTimeSec(value float64) float64 {
+	if value <= 0 {
+		return 0
+	}
+	return value
+}
+
+func buildFingerprintAggregationQuery(sourceID int64, dbName string, minQueryTimeSec float64) (string, []any) {
+	clauses := []string{"r.source_id = ?"}
+	args := []any{sourceID}
+	if minQueryTimeSec > 0 {
+		clauses = append(clauses, "r.query_time_sec >= ?")
+		args = append(args, minQueryTimeSec)
+	}
+	if strings.TrimSpace(dbName) != "" {
+		clauses = append(clauses, "r.db_name = ?")
+		args = append(args, dbName)
+	}
+
+	query := `
+		SELECT
+			r.fingerprint_id,
+			COUNT(*) AS total_count,
+			COALESCE(SUM(r.query_time_sec), 0) AS total_query_time_sec,
+			COALESCE(AVG(r.query_time_sec), 0) AS avg_query_time_sec,
+			COALESCE(MAX(r.query_time_sec), 0) AS max_query_time_sec,
+			COALESCE(SUM(COALESCE(r.rows_examined, 0)), 0) AS total_rows_examined,
+			COALESCE(AVG(COALESCE(r.rows_examined, 0)), 0) AS avg_rows_examined,
+			COALESCE(MAX(COALESCE(r.rows_examined, 0)), 0) AS max_rows_examined,
+			COALESCE(SUM(COALESCE(r.rows_sent, 0)), 0) AS total_rows_sent,
+			COALESCE(AVG(COALESCE(r.rows_sent, 0)), 0) AS avg_rows_sent,
+			COALESCE(MAX(COALESCE(r.rows_sent, 0)), 0) AS max_rows_sent,
+			MIN(r.occurred_at) AS first_seen_at,
+			MAX(r.occurred_at) AS last_seen_at,
+			MAX(r.created_at) AS updated_at
+		FROM slow_query_records r
+		WHERE ` + strings.Join(clauses, " AND ") + `
+		GROUP BY r.fingerprint_id`
+	return query, args
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, definition string) error {

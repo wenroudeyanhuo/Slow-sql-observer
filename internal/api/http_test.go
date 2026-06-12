@@ -14,7 +14,7 @@ import (
 
 type stubQueryService struct{}
 
-func (stubQueryService) GetOverview(context.Context) (model.Overview, error) {
+func (stubQueryService) GetOverview(context.Context, model.OverviewParams) (model.Overview, error) {
 	now := time.Now().UTC()
 	return model.Overview{TotalRecords: 1, TotalFingerprints: 1, LastIngestedAt: &now}, nil
 }
@@ -23,7 +23,7 @@ func (stubQueryService) ListFingerprints(context.Context, model.ListFingerprints
 	return model.PaginatedFingerprints{Items: []model.FingerprintRecordView{{Fingerprint: model.Fingerprint{ID: 1, Hash: "abc"}}}}, nil
 }
 
-func (stubQueryService) GetFingerprint(context.Context, int64) (*model.FingerprintRecordView, error) {
+func (stubQueryService) GetFingerprint(context.Context, int64, model.GetFingerprintParams) (*model.FingerprintRecordView, error) {
 	return &model.FingerprintRecordView{Fingerprint: model.Fingerprint{ID: 1, Hash: "abc"}}, nil
 }
 
@@ -52,7 +52,7 @@ func (stubQueryService) GetSourceID(context.Context) (int64, error) {
 }
 
 func TestOverviewEndpoint(t *testing.T) {
-	server := NewServer(stubQueryService{}, "../../web")
+	server := NewServer(stubQueryService{}, "../../web", 1)
 	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/overview", nil)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
@@ -68,7 +68,7 @@ func TestRootServesIndexWithoutRedirectLoop(t *testing.T) {
 		t.Fatalf("write index file: %v", err)
 	}
 
-	server := NewServer(stubQueryService{}, webDir)
+	server := NewServer(stubQueryService{}, webDir, 1)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
@@ -82,7 +82,7 @@ func TestRootServesIndexWithoutRedirectLoop(t *testing.T) {
 }
 
 func TestSourceStatusEndpoints(t *testing.T) {
-	server := NewServer(stubQueryService{}, "../../web")
+	server := NewServer(stubQueryService{}, "../../web", 1)
 
 	sourceReq := httptest.NewRequest(http.MethodGet, "/api/source", nil)
 	sourceRecorder := httptest.NewRecorder()
@@ -103,5 +103,101 @@ func TestSourceStatusEndpoints(t *testing.T) {
 	server.Handler().ServeHTTP(acquisitionRecorder, acquisitionReq)
 	if acquisitionRecorder.Code != http.StatusOK {
 		t.Fatalf("expected acquisition status endpoint status 200, got %d", acquisitionRecorder.Code)
+	}
+}
+
+type captureQueryService struct {
+	stubQueryService
+	overviewParams           model.OverviewParams
+	fingerprintListParams    model.ListFingerprintsParams
+	fingerprintDetailParams  model.GetFingerprintParams
+	fingerprintRecordsParams model.ListFingerprintRecordsParams
+}
+
+func (c *captureQueryService) GetOverview(ctx context.Context, params model.OverviewParams) (model.Overview, error) {
+	c.overviewParams = params
+	return c.stubQueryService.GetOverview(ctx, params)
+}
+
+func (c *captureQueryService) ListFingerprints(ctx context.Context, params model.ListFingerprintsParams) (model.PaginatedFingerprints, error) {
+	c.fingerprintListParams = params
+	return c.stubQueryService.ListFingerprints(ctx, params)
+}
+
+func (c *captureQueryService) GetFingerprint(ctx context.Context, id int64, params model.GetFingerprintParams) (*model.FingerprintRecordView, error) {
+	c.fingerprintDetailParams = params
+	return c.stubQueryService.GetFingerprint(ctx, id, params)
+}
+
+func (c *captureQueryService) ListFingerprintRecords(ctx context.Context, id int64, params model.ListFingerprintRecordsParams) (model.PaginatedRecords, error) {
+	c.fingerprintRecordsParams = params
+	return c.stubQueryService.ListFingerprintRecords(ctx, id, params)
+}
+
+func TestThresholdQueryParamPropagation(t *testing.T) {
+	service := &captureQueryService{}
+	server := NewServer(service, "../../web", 1)
+
+	cases := []struct {
+		path  string
+		check func(t *testing.T)
+	}{
+		{
+			path: "/api/dashboard/overview?minQueryTimeSec=2.5",
+			check: func(t *testing.T) {
+				if service.overviewParams.MinQueryTimeSec != 2.5 {
+					t.Fatalf("expected overview threshold 2.5, got %v", service.overviewParams.MinQueryTimeSec)
+				}
+			},
+		},
+		{
+			path: "/api/slow-sql/fingerprints?minQueryTimeSec=3",
+			check: func(t *testing.T) {
+				if service.fingerprintListParams.MinQueryTimeSec != 3 {
+					t.Fatalf("expected fingerprint list threshold 3, got %v", service.fingerprintListParams.MinQueryTimeSec)
+				}
+			},
+		},
+		{
+			path: "/api/slow-sql/fingerprints/1?minQueryTimeSec=4",
+			check: func(t *testing.T) {
+				if service.fingerprintDetailParams.MinQueryTimeSec != 4 {
+					t.Fatalf("expected fingerprint detail threshold 4, got %v", service.fingerprintDetailParams.MinQueryTimeSec)
+				}
+			},
+		},
+		{
+			path: "/api/slow-sql/fingerprints/1/records?minQueryTimeSec=5",
+			check: func(t *testing.T) {
+				if service.fingerprintRecordsParams.MinQueryTimeSec != 5 {
+					t.Fatalf("expected fingerprint records threshold 5, got %v", service.fingerprintRecordsParams.MinQueryTimeSec)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected status 200 for %s, got %d", tc.path, recorder.Code)
+		}
+		tc.check(t)
+	}
+}
+
+func TestThresholdDefaultsToServerConfig(t *testing.T) {
+	service := &captureQueryService{}
+	server := NewServer(service, "../../web", 1.25)
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/overview", nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+	if service.overviewParams.MinQueryTimeSec != 1.25 {
+		t.Fatalf("expected default threshold 1.25, got %v", service.overviewParams.MinQueryTimeSec)
 	}
 }

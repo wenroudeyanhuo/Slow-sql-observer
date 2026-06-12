@@ -119,6 +119,7 @@ Core settings:
 - `SSO_ANALYSIS_DB_SCHEMA`
 - `SSO_COLLECTOR_POLL_INTERVAL`
 - `SSO_RAW_RECORD_RETENTION_DAYS`
+- `SSO_ANALYSIS_MIN_QUERY_TIME_SEC`
 - `SSO_LOG_LEVEL`
 
 Mode-specific settings:
@@ -149,6 +150,23 @@ Legacy compatibility:
 
 When both legacy and current names are present, the current names win.
 
+## Collection threshold vs analysis threshold
+
+Slow SQL Observer now treats these as two separate concepts:
+
+- MySQL collection threshold
+  Usually controlled by MySQL settings such as `slow_query_log` and `long_query_time`.
+  This decides which statements enter the slow-log source at all.
+- Slow SQL Observer analysis threshold
+  Controlled by `SSO_ANALYSIS_MIN_QUERY_TIME_SEC`.
+  This decides which collected records appear in the default overview and ranking views.
+
+Example:
+
+- MySQL can collect at `0.2s` so you keep more raw samples.
+- Slow SQL Observer can analyze by default at `1.0s` so the main UI stays focused on materially slow statements.
+- API and UI requests can override the default with `minQueryTimeSec`.
+
 ## Quick start
 
 ### Option A: sample log
@@ -170,6 +188,7 @@ Recommended for real validation on a local MySQL instance:
 2. Point `SSO_SOURCE_MODE=local_file`.
 3. Set `SSO_SOURCE_SLOW_LOG_PATH` to the full slow-log file path.
 4. Point `SSO_SOURCE_DB_DSN` at the same local MySQL instance if you want source metadata.
+5. Optionally set `SSO_ANALYSIS_MIN_QUERY_TIME_SEC=1` so the default ranking views focus on queries at or above 1 second.
 
 Windows note:
 
@@ -189,9 +208,12 @@ Start the collector in another terminal:
 go run ./cmd/collector
 ```
 
-Then open:
+Then open the address that matches `SSO_SERVER_ADDR`.
 
-- [http://localhost:8080](http://localhost:8080)
+Examples:
+
+- if `SSO_SERVER_ADDR=:8080`, open [http://localhost:8080](http://localhost:8080)
+- if `SSO_SERVER_ADDR=:8191`, open [http://localhost:8191](http://localhost:8191)
 
 If your local Go build cache path is permission-restricted, set a repo-local cache first:
 
@@ -230,8 +252,19 @@ Suggested validation flow:
    - `/api/dashboard/overview`
    - `/api/slow-sql/fingerprints`
    - `/api/slow-sql/fingerprints/:id/records`
+   - optionally compare `/api/slow-sql/fingerprints?minQueryTimeSec=0.2` and `/api/slow-sql/fingerprints?minQueryTimeSec=1`
 
 This has been verified locally against a real MySQL slow-log file.
+
+## Release close-out
+
+This release is a usable single-source edition and is suitable for:
+
+- local MySQL slow-log collection from a readable file
+- local or reachable MySQL slow-log collection from `mysql.slow_log`
+- one observed MySQL instance that may contain multiple business databases
+
+This release does not attempt to solve every hosted-MySQL slow-log scenario. The main unsupported case is a managed instance that only writes slow logs to `FILE` but does not expose SSH or a provider-side log API.
 
 ## How to think about database scope
 
@@ -265,6 +298,13 @@ Current HTTP routes:
 - `GET /api/slow-sql/fingerprints`
 - `GET /api/slow-sql/fingerprints/:id`
 - `GET /api/slow-sql/fingerprints/:id/records`
+
+Threshold-aware examples:
+
+- `GET /api/dashboard/overview?minQueryTimeSec=1`
+- `GET /api/slow-sql/fingerprints?minQueryTimeSec=1`
+- `GET /api/slow-sql/fingerprints/:id?minQueryTimeSec=1`
+- `GET /api/slow-sql/fingerprints/:id/records?minQueryTimeSec=1`
 
 Detailed field-level API documentation:
 

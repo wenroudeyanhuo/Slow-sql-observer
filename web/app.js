@@ -28,6 +28,12 @@ function formatBytes(value) {
   return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+function formatThreshold(value) {
+  const numeric = Number(value || 0);
+  if (numeric <= 0) return "all collected records";
+  return `query time >= ${numeric.toFixed(3)}s`;
+}
+
 function escapeHTML(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -91,11 +97,14 @@ function renderStatusMessage(label, message) {
   return `<div class="status-message"><strong>${escapeHTML(label)}:</strong> ${escapeHTML(message)}</div>`;
 }
 
-function renderFingerprintCard(item) {
+function renderFingerprintCard(item, thresholdQuery = "") {
+  const href = thresholdQuery
+    ? `/fingerprint.html?id=${item.id}&${thresholdQuery}`
+    : `/fingerprint.html?id=${item.id}`;
   return `
     <article class="item">
       <div class="row-head">
-        <h3><a href="/fingerprint.html?id=${item.id}">#${item.id}</a></h3>
+        <h3><a href="${href}">#${item.id}</a></h3>
         <span class="chip">${escapeHTML(item.sqlType)}</span>
       </div>
       <pre>${escapeHTML(item.normalizedSql)}</pre>
@@ -239,7 +248,35 @@ async function loadSourceContext() {
 async function loadOverview() {
   const metrics = document.getElementById("overview-metrics");
   const top = document.getElementById("overview-top");
-  const data = await fetchJSON("/api/dashboard/overview");
+  const thresholdNote = document.getElementById("overview-threshold");
+  const form = document.getElementById("overview-filters");
+  const params = new URLSearchParams(window.location.search);
+  const query = new URLSearchParams();
+  if (params.get("minQueryTimeSec")) {
+    query.set("minQueryTimeSec", params.get("minQueryTimeSec"));
+  }
+  if (form) {
+    form.minQueryTimeSec.value = query.get("minQueryTimeSec");
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const next = new URLSearchParams(window.location.search);
+      const value = form.minQueryTimeSec.value.trim();
+      if (value) {
+        next.set("minQueryTimeSec", value);
+      } else {
+        next.delete("minQueryTimeSec");
+      }
+      window.location.search = next.toString();
+    });
+  }
+
+  const data = await fetchJSON("/api/dashboard/overview" + (query.toString() ? `?${query.toString()}` : ""));
+  if (form && !query.get("minQueryTimeSec")) {
+    form.minQueryTimeSec.value = data.activeMinQueryTimeSec || 0;
+  }
+  if (thresholdNote) {
+    thresholdNote.textContent = `Showing ${formatThreshold(data.activeMinQueryTimeSec)}`;
+  }
   metrics.innerHTML = `
     <div class="metric"><span>Total records</span><strong>${data.totalRecords}</strong></div>
     <div class="metric"><span>Total fingerprints</span><strong>${data.totalFingerprints}</strong></div>
@@ -253,11 +290,12 @@ async function loadOverview() {
     top.innerHTML = `<div class="empty">${escapeHTML(sourceStateMessage("No slow SQL data has been ingested yet for this source."))}</div>`;
     return;
   }
-  top.innerHTML = `<div class="list">${data.topFingerprints.map(renderFingerprintCard).join("")}</div>`;
+  top.innerHTML = `<div class="list">${data.topFingerprints.map((item) => renderFingerprintCard(item, query.toString())).join("")}</div>`;
 }
 
 async function loadFingerprints(params = new URLSearchParams(window.location.search)) {
   const container = document.getElementById("fingerprint-list");
+  const thresholdNote = document.getElementById("fingerprint-threshold");
   const query = new URLSearchParams({
     page: "1",
     pageSize: "20",
@@ -265,7 +303,8 @@ async function loadFingerprints(params = new URLSearchParams(window.location.sea
     sortOrder: "desc",
     keyword: params.get("keyword") || "",
     dbName: params.get("dbName") || "",
-    sqlType: params.get("sqlType") || ""
+    sqlType: params.get("sqlType") || "",
+    minQueryTimeSec: params.get("minQueryTimeSec") || ""
   });
 
   const form = document.getElementById("filters");
@@ -274,6 +313,7 @@ async function loadFingerprints(params = new URLSearchParams(window.location.sea
     form.dbName.value = query.get("dbName");
     form.sqlType.value = query.get("sqlType");
     form.sortBy.value = query.get("sortBy");
+    form.minQueryTimeSec.value = query.get("minQueryTimeSec");
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const next = new URLSearchParams(new FormData(form));
@@ -286,7 +326,17 @@ async function loadFingerprints(params = new URLSearchParams(window.location.sea
     container.innerHTML = `<div class="empty">${escapeHTML(sourceStateMessage("No fingerprints match the current filters for this source."))}</div>`;
     return;
   }
-  container.innerHTML = `<div class="list">${data.items.map(renderFingerprintCard).join("")}</div>`;
+  if (form && !query.get("minQueryTimeSec")) {
+    form.minQueryTimeSec.value = data.activeMinQueryTimeSec || 0;
+  }
+  if (thresholdNote) {
+    thresholdNote.textContent = `Showing ${formatThreshold(data.activeMinQueryTimeSec)}`;
+  }
+  const thresholdQuery = new URLSearchParams();
+  if (query.get("minQueryTimeSec")) {
+    thresholdQuery.set("minQueryTimeSec", query.get("minQueryTimeSec"));
+  }
+  container.innerHTML = `<div class="list">${data.items.map((item) => renderFingerprintCard(item, thresholdQuery.toString())).join("")}</div>`;
 }
 
 async function loadDetail() {
@@ -294,13 +344,39 @@ async function loadDetail() {
   const id = params.get("id");
   const detail = document.getElementById("fingerprint-detail");
   const records = document.getElementById("fingerprint-records");
+  const thresholdNote = document.getElementById("detail-threshold");
+  const form = document.getElementById("detail-filters");
   if (!id) {
     detail.innerHTML = `<div class="empty">Missing fingerprint id.</div>`;
     return;
   }
 
+  if (form) {
+    form.minQueryTimeSec.value = params.get("minQueryTimeSec") || "";
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const next = new URLSearchParams(window.location.search);
+      const value = form.minQueryTimeSec.value.trim();
+      if (value) {
+        next.set("minQueryTimeSec", value);
+      } else {
+        next.delete("minQueryTimeSec");
+      }
+      window.location.search = next.toString();
+    });
+  }
+
+  const detailQuery = params.get("minQueryTimeSec")
+    ? `?minQueryTimeSec=${encodeURIComponent(params.get("minQueryTimeSec"))}`
+    : "";
   try {
-    const fingerprint = await fetchJSON(`/api/slow-sql/fingerprints/${id}`);
+    const fingerprint = await fetchJSON(`/api/slow-sql/fingerprints/${id}${detailQuery}`);
+    if (form && !params.get("minQueryTimeSec")) {
+      form.minQueryTimeSec.value = fingerprint.activeMinQueryTimeSec || 0;
+    }
+    if (thresholdNote) {
+      thresholdNote.textContent = `Showing ${formatThreshold(fingerprint.activeMinQueryTimeSec)}`;
+    }
     detail.innerHTML = `
       <div class="detail">
         <div class="row-head">
@@ -325,7 +401,16 @@ async function loadDetail() {
     return;
   }
 
-  const data = await fetchJSON(`/api/slow-sql/fingerprints/${id}/records?page=1&pageSize=20&sortBy=occurredAt&sortOrder=desc`);
+  const recordParams = new URLSearchParams({
+    page: "1",
+    pageSize: "20",
+    sortBy: "occurredAt",
+    sortOrder: "desc"
+  });
+  if (params.get("minQueryTimeSec")) {
+    recordParams.set("minQueryTimeSec", params.get("minQueryTimeSec"));
+  }
+  const data = await fetchJSON(`/api/slow-sql/fingerprints/${id}/records?${recordParams.toString()}`);
   if (!data.items || data.items.length === 0) {
     records.innerHTML = `<div class="empty">${escapeHTML(sourceStateMessage("No sample records are available for this fingerprint yet."))}</div>`;
     return;
